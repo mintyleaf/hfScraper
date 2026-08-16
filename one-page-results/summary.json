@@ -1,0 +1,31 @@
+{
+  "complete": false,
+  "definition": {
+    "candidate": "weights present and no derivative evidence, but README has no explicit scratch claim",
+    "confirmed": "weights present, no derivative metadata, explicit non-negated README claim of training from scratch",
+    "year": "UTC year of the Hugging Face repository createdAt timestamp"
+  },
+  "generated_at": "2026-08-13T11:54:47.094347554Z",
+  "years": {
+    "2025": {
+      "broad_upper_bound": 0,
+      "reasons": {}
+    },
+    "2026": {
+      "broad_upper_bound": 462,
+      "candidate": 461,
+      "confirmed": 1,
+      "excluded": 538,
+      "reasons": {
+        "adapter_files": 186,
+        "declares_base_model": 148,
+        "derivative_name": 27,
+        "derivative_tag": 11,
+        "explicit_scratch_claim": 1,
+        "no_explicit_scratch_claim": 461,
+        "no_recognized_full_weight_file": 165,
+        "scratch_claim_not_usable": 1
+      }
+    }
+  }
+}
