@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"testing"
+	"time"
 )
 
 func testModel() model {
@@ -127,5 +128,45 @@ func TestParseYears(t *testing.T) {
 func TestTruncateKeepsUTF8Valid(t *testing.T) {
 	if got := truncate("модель", 3); got != "мод" {
 		t.Fatalf("truncate() = %q", got)
+	}
+}
+
+func TestCatalogModelKind(t *testing.T) {
+	tests := []struct {
+		id, relation, want string
+		tags               []string
+	}{
+		{"org/model", "", "base", nil},
+		{"org/model-lora", "", "adapter", nil},
+		{"org/model-sft", "", "finetune", nil},
+		{"org/model-GGUF", "", "quantized", []string{"gguf"}},
+		{"org/model", "adapter", "adapter", nil},
+		{"org/model", "", "finetune", []string{"base_model:finetune:org/base"}},
+	}
+	for _, tt := range tests {
+		model := catalogModel{ID: tt.id, Tags: tt.tags, BaseModels: catalogBaseModels{Relation: tt.relation}}
+		if got := catalogModelKind(model); got != tt.want {
+			t.Errorf("catalogModelKind(%q) = %q, want %q", tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestComputeEstimate(t *testing.T) {
+	profile := computeProfile{Name: "test", GPUName: "GPU", GPUTFLOPS: 989, Efficiency: .4, GPUHourCostUSD: 1.85, TokensPerParameter: 20, Machines: 256, GPUsPerMachine: 4, FinetuneCostFraction: .05}
+	base := estimateCompute(70_000_000_000, "base", profile)
+	adapter := estimateCompute(70_000_000_000, "adapter", profile)
+	if base.TotalGPUs != 1024 || base.WallDays <= 0 || base.CostUSD <= 0 {
+		t.Fatalf("invalid base estimate: %#v", base)
+	}
+	if ratio := adapter.GPUHours / base.GPUHours; ratio < .05-1e-12 || ratio > .05+1e-12 {
+		t.Fatalf("adapter fraction = %f", ratio)
+	}
+}
+
+func TestRateLimitDelay(t *testing.T) {
+	header := http.Header{}
+	header.Set("RateLimit", `"api";r=0;t=42`)
+	if got := rateLimitDelay(header); got != 43*time.Second {
+		t.Fatalf("rateLimitDelay() = %s", got)
 	}
 }

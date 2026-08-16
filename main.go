@@ -99,6 +99,7 @@ type classifiedItem struct {
 
 func (c *httpClient) get(ctx context.Context, address string, allowMissing bool) ([]byte, http.Header, error) {
 	for attempt := 0; attempt <= c.retries; attempt++ {
+		serverDelay := time.Duration(0)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
 		if err != nil {
 			return nil, nil, err
@@ -122,12 +123,16 @@ func (c *httpClient) get(ctx context.Context, address string, allowMissing bool)
 				return nil, resp.Header, fmt.Errorf("GET %s: HTTP %s", address, resp.Status)
 			} else {
 				err = fmt.Errorf("GET %s: HTTP %s", address, resp.Status)
+				serverDelay = rateLimitDelay(resp.Header)
 			}
 		}
 		if attempt == c.retries {
 			return nil, nil, err
 		}
 		delay := time.Duration(1<<attempt) * time.Second
+		if serverDelay > delay {
+			delay = serverDelay
+		}
 		delay += time.Duration(rand.Intn(250)) * time.Millisecond
 		select {
 		case <-ctx.Done():
@@ -136,6 +141,28 @@ func (c *httpClient) get(ctx context.Context, address string, allowMissing bool)
 		}
 	}
 	return nil, nil, errors.New("unreachable")
+}
+
+func rateLimitDelay(header http.Header) time.Duration {
+	if value := header.Get("Retry-After"); value != "" {
+		if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+			return time.Duration(seconds+1) * time.Second
+		}
+		if when, err := http.ParseTime(value); err == nil {
+			if delay := time.Until(when) + time.Second; delay > 0 {
+				return delay
+			}
+		}
+	}
+	for _, part := range strings.Split(header.Get("RateLimit"), ";") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "t=") {
+			if seconds, err := strconv.Atoi(strings.TrimPrefix(part, "t=")); err == nil && seconds >= 0 {
+				return time.Duration(seconds+1) * time.Second
+			}
+		}
+	}
+	return 0
 }
 
 func retryableStatus(code int) bool {
@@ -504,6 +531,14 @@ func parseYears(value string) ([]int, error) {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "catalog" {
+		if err := runCatalogCLI(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	var yearsValue string
 	opts := options{}
 	flag.StringVar(&yearsValue, "years", "2025,2026", "comma-separated UTC publication years")
