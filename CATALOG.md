@@ -9,6 +9,12 @@
 go run . catalog --config catalog.example.json
 ```
 
+Расширенный набор сценариев запускается так:
+
+```bash
+go run . catalog --config catalog.scenarios.json
+```
+
 Другой каталог результатов задаётся без редактирования JSON:
 
 ```bash
@@ -39,6 +45,7 @@ go run . catalog --config my-config.json --output my-results
 - `owners.csv` и `owners.json` — уникальные пользователи и организации;
 - `summary.json` — числа моделей и владельцев, типы, downloads и likes по каждой
   выборке.
+- `catalog.log.jsonl` — структурированные события, повторы HTTP и ошибки.
 
 Одна модель может входить в несколько выборок. В статистике владельца один и тот
 же repo учитывается один раз.
@@ -52,10 +59,21 @@ go run . catalog --config my-config.json --output my-results
 - `max_pages` ограничивает проход; ноль сканирует до самой ранней даты выборок.
 - `require_weights` исключает репозитории без распознанных весов.
 - `resolve_base_parameters` получает размер базовой модели для adapters в
-  выборках с диапазоном параметров.
+  выборках с диапазоном параметров или compute-профилем.
 - `timeout_seconds`, `retries` и `quiet` управляют HTTP и прогрессом.
 
 Если проход ограничен `max_pages`, `summary.json` содержит `complete: false`.
+
+## Логирование и ошибки
+
+Секция `logging` задаёт `level` (`debug`, `info`, `warn`, `error`), имя JSONL-файла
+`file`, дублирование в `stderr`, подробные `http_requests` и логирование обычных
+`skipped_records`. HTTP-повторы и окончательные ошибки логируются независимо от
+детализации успешных запросов.
+
+Ошибки страницы каталога и записи результатов фатальны. Ошибка одного owner или
+base-model enrichment не уничтожает всю выборку: причина сохраняется в owner
+`error` или model `errors`, а также в JSONL-логе.
 
 ## Фильтры выборки
 

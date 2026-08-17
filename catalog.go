@@ -7,11 +7,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,12 +23,13 @@ import (
 )
 
 type catalogConfig struct {
-	Endpoint   string            `json:"endpoint"`
-	OutputDir  string            `json:"output_dir"`
-	Scan       catalogScanConfig `json:"scan"`
-	Owners     ownerConfig       `json:"owners"`
-	Compute    []computeProfile  `json:"compute_profiles"`
-	Selections []selectionConfig `json:"selections"`
+	Endpoint   string               `json:"endpoint"`
+	OutputDir  string               `json:"output_dir"`
+	Scan       catalogScanConfig    `json:"scan"`
+	Logging    catalogLoggingConfig `json:"logging"`
+	Owners     ownerConfig          `json:"owners"`
+	Compute    []computeProfile     `json:"compute_profiles"`
+	Selections []selectionConfig    `json:"selections"`
 }
 
 type catalogScanConfig struct {
@@ -73,6 +77,7 @@ type selectionConfig struct {
 
 type computeProfile struct {
 	Name                 string  `json:"name"`
+	Description          string  `json:"description"`
 	GPUName              string  `json:"gpu_name"`
 	GPUTFLOPS            float64 `json:"gpu_tflops"`
 	Efficiency           float64 `json:"efficiency"`
@@ -142,6 +147,7 @@ type catalogRecord struct {
 	Likes               int64             `json:"likes"`
 	Tags                []string          `json:"tags"`
 	Compute             []computeEstimate `json:"compute_estimates,omitempty"`
+	Errors              []string          `json:"errors,omitempty"`
 }
 
 type ownerOverview struct {
@@ -220,6 +226,12 @@ func runCatalogCLI(arguments []string) error {
 	if err := decoder.Decode(&config); err != nil {
 		return fmt.Errorf("decode config: %w", err)
 	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("decode config: more than one JSON value")
+		}
+		return fmt.Errorf("decode trailing config data: %w", err)
+	}
 	if *outputOverride != "" {
 		config.OutputDir = *outputOverride
 	}
@@ -240,6 +252,12 @@ func applyCatalogDefaults(config *catalogConfig) {
 	}
 	if config.OutputDir == "" {
 		config.OutputDir = "catalog-results"
+	}
+	if config.Logging.Level == "" {
+		config.Logging.Level = "info"
+	}
+	if config.Logging.File == "" {
+		config.Logging.File = "catalog.log.jsonl"
 	}
 	if config.Scan.PageSize == 0 {
 		config.Scan.PageSize = 1000
@@ -296,7 +314,7 @@ func compileSelections(config catalogConfig, now time.Time) ([]compiledSelection
 		if profile.Name == "" || profiles[profile.Name] {
 			return nil, time.Time{}, errors.New("compute profile names must be non-empty and unique")
 		}
-		if profile.GPUTFLOPS <= 0 || profile.Efficiency <= 0 || profile.Efficiency > 1 || profile.GPUHourCostUSD < 0 || profile.TokensPerParameter <= 0 || profile.Machines <= 0 || profile.GPUsPerMachine <= 0 || profile.FinetuneCostFraction < 0 {
+		if profile.GPUTFLOPS <= 0 || profile.Efficiency <= 0 || profile.Efficiency > 1 || profile.GPUHourCostUSD < 0 || profile.TokensPerParameter <= 0 || profile.Machines <= 0 || profile.GPUsPerMachine <= 0 || profile.FinetuneCostFraction < 0 || profile.FinetuneCostFraction > 1 {
 			return nil, time.Time{}, fmt.Errorf("compute profile %q has invalid settings", profile.Name)
 		}
 		profiles[profile.Name] = true
@@ -469,13 +487,21 @@ func containsNone(set map[string]bool, values []string) bool {
 	return true
 }
 
-func effectiveParameters(model catalogModel, baseParameters map[string]int64) int64 {
+func effectiveParameters(model catalogModel, baseParameters map[string]int64, baseErrors map[string]string) (int64, string) {
 	if catalogModelKind(model) == "adapter" {
-		if value := baseParameters[firstBaseModel(model)]; value > 0 {
-			return value
+		baseID := firstBaseModel(model)
+		if baseID == "" {
+			return 0, "adapter has no declared base model"
 		}
+		if value := baseParameters[baseID]; value > 0 {
+			return value, ""
+		}
+		if message := baseErrors[baseID]; message != "" {
+			return 0, message
+		}
+		return 0, "base model parameter count was not resolved"
 	}
-	return model.Safetensors.Total
+	return model.Safetensors.Total, ""
 }
 
 func matchesSelection(model catalogModel, selection compiledSelection, effectiveParams int64) bool {
@@ -537,7 +563,7 @@ func modelOwner(model catalogModel) string {
 	return ""
 }
 
-func modelToRecord(endpoint string, model catalogModel, selection selectionConfig, params int64, profiles map[string]computeProfile) catalogRecord {
+func modelToRecord(endpoint string, model catalogModel, selection selectionConfig, params int64, parameterError string, profiles map[string]computeProfile) catalogRecord {
 	var billions *float64
 	if params > 0 {
 		value := float64(params) / 1e9
@@ -552,9 +578,17 @@ func modelToRecord(endpoint string, model catalogModel, selection selectionConfi
 		OwnParameters: model.Safetensors.Total, EffectiveParameters: params, ParametersB: billions,
 		Downloads: model.Downloads, Likes: model.Likes, Tags: model.Tags,
 	}
+	if parameterError != "" {
+		record.Errors = append(record.Errors, parameterError)
+	}
 	for _, profileName := range selection.ComputeProfiles {
 		if profile, ok := profiles[profileName]; ok && params > 0 {
-			record.Compute = append(record.Compute, estimateCompute(params, catalogModelKind(model), profile))
+			estimate := estimateCompute(params, catalogModelKind(model), profile)
+			if math.IsNaN(estimate.GPUHours) || math.IsInf(estimate.GPUHours, 0) || math.IsNaN(estimate.WallDays) || math.IsInf(estimate.WallDays, 0) || math.IsNaN(estimate.CostUSD) || math.IsInf(estimate.CostUSD, 0) {
+				record.Errors = append(record.Errors, "compute estimate overflow for profile "+profileName)
+				continue
+			}
+			record.Compute = append(record.Compute, estimate)
 		}
 	}
 	return record
@@ -611,12 +645,14 @@ func sortValueDifferent(a, b catalogRecord, field string) bool {
 	}
 }
 
-func fetchBaseParameters(ctx context.Context, client *httpClient, endpoint string, ids []string, workers int) map[string]int64 {
+func fetchBaseParameters(ctx context.Context, client *httpClient, endpoint string, ids []string, workers int, logger *catalogLogger) (map[string]int64, map[string]string) {
 	result := make(map[string]int64)
+	errorsByID := make(map[string]string)
 	jobs := make(chan string)
 	type response struct {
 		id    string
 		total int64
+		err   error
 	}
 	responses := make(chan response)
 	var wg sync.WaitGroup
@@ -629,14 +665,25 @@ func fetchBaseParameters(ctx context.Context, client *httpClient, endpoint strin
 				query.Add("expand", "safetensors")
 				address := strings.TrimRight(endpoint, "/") + "/api/models/" + escapeRepoID(id) + "?" + query.Encode()
 				body, _, err := client.get(ctx, address, true)
-				if err != nil || len(body) == 0 {
-					responses <- response{id: id}
+				if err != nil {
+					responses <- response{id: id, err: fmt.Errorf("fetch base model metadata: %w", err)}
+					continue
+				}
+				if len(body) == 0 {
+					responses <- response{id: id, err: errors.New("base model metadata is unavailable")}
 					continue
 				}
 				var info struct {
 					Safetensors catalogSafetensors `json:"safetensors"`
 				}
-				_ = json.Unmarshal(body, &info)
+				if err := json.Unmarshal(body, &info); err != nil {
+					responses <- response{id: id, err: fmt.Errorf("decode base model metadata: %w", err)}
+					continue
+				}
+				if info.Safetensors.Total <= 0 {
+					responses <- response{id: id, err: errors.New("base model has no safetensors parameter count")}
+					continue
+				}
 				responses <- response{id: id, total: info.Safetensors.Total}
 			}
 		}()
@@ -651,8 +698,12 @@ func fetchBaseParameters(ctx context.Context, client *httpClient, endpoint strin
 	}()
 	for response := range responses {
 		result[response.id] = response.total
+		if response.err != nil {
+			errorsByID[response.id] = response.err.Error()
+			logger.warn("base_parameters_failed", "could not resolve base model parameters", map[string]any{"base_model": response.id, "error": response.err.Error()})
+		}
 	}
-	return result
+	return result, errorsByID
 }
 
 func escapeRepoID(id string) string {
@@ -663,7 +714,7 @@ func escapeRepoID(id string) string {
 	return strings.Join(parts, "/")
 }
 
-func fetchOwners(ctx context.Context, client *httpClient, endpoint string, names []string, workers int) map[string]*ownerOverview {
+func fetchOwners(ctx context.Context, client *httpClient, endpoint string, names []string, workers int, logger *catalogLogger) map[string]*ownerOverview {
 	result := make(map[string]*ownerOverview)
 	jobs := make(chan string)
 	type response struct {
@@ -678,28 +729,43 @@ func fetchOwners(ctx context.Context, client *httpClient, endpoint string, names
 			defer wg.Done()
 			for name := range jobs {
 				overview := &ownerOverview{Name: name, Type: "unknown"}
+				var lookupErrors []string
 				orgURL := strings.TrimRight(endpoint, "/") + "/api/organizations/" + url.PathEscape(name) + "/overview"
 				body, _, err := client.get(ctx, orgURL, true)
-				if err == nil && len(body) > 0 && json.Unmarshal(body, overview) == nil {
-					overview.Type = "organization"
-					responses <- response{name, overview}
-					continue
+				if err != nil {
+					lookupErrors = append(lookupErrors, "organization lookup: "+err.Error())
+				} else if len(body) > 0 {
+					if decodeErr := json.Unmarshal(body, overview); decodeErr == nil {
+						overview.Type = "organization"
+						responses <- response{name, overview}
+						continue
+					} else {
+						lookupErrors = append(lookupErrors, "decode organization profile: "+decodeErr.Error())
+					}
 				}
+				overview = &ownerOverview{Name: name, Type: "unknown"}
 				userURL := strings.TrimRight(endpoint, "/") + "/api/users/" + url.PathEscape(name) + "/overview"
 				body, _, err = client.get(ctx, userURL, true)
-				if err == nil && len(body) > 0 && json.Unmarshal(body, overview) == nil {
-					overview.Type = "user"
-					if overview.Name == "" {
-						overview.Name = name
-					}
-					responses <- response{name, overview}
-					continue
-				}
 				if err != nil {
-					overview.Error = err.Error()
+					lookupErrors = append(lookupErrors, "user lookup: "+err.Error())
+				} else if len(body) > 0 {
+					if decodeErr := json.Unmarshal(body, overview); decodeErr == nil {
+						overview.Type = "user"
+						if overview.Name == "" {
+							overview.Name = name
+						}
+						responses <- response{name, overview}
+						continue
+					} else {
+						lookupErrors = append(lookupErrors, "decode user profile: "+decodeErr.Error())
+					}
+				}
+				if len(lookupErrors) > 0 {
+					overview.Error = strings.Join(lookupErrors, "; ")
 				} else {
 					overview.Error = "profile not found"
 				}
+				logger.warn("owner_profile_failed", "could not enrich repository owner", map[string]any{"owner": name, "error": overview.Error})
 				responses <- response{name, overview}
 			}
 		}()
@@ -718,9 +784,47 @@ func fetchOwners(ctx context.Context, client *httpClient, endpoint string, names
 	return result
 }
 
-func runCatalog(ctx context.Context, config catalogConfig) error {
-	if config.Scan.PageSize < 1 || config.Scan.PageSize > 1000 || config.Scan.MaxPages < 0 || config.Scan.TimeoutSeconds <= 0 || config.Owners.Workers < 1 || config.Owners.Workers > 64 || config.Scan.Retries == nil || *config.Scan.Retries < 0 {
-		return errors.New("invalid page_size, max_pages, or owner workers")
+func runCatalog(ctx context.Context, config catalogConfig) (resultErr error) {
+	applyCatalogDefaults(&config)
+	if err := os.MkdirAll(config.OutputDir, 0o755); err != nil {
+		return fmt.Errorf("create output directory %q: %w", config.OutputDir, err)
+	}
+	logger, err := newCatalogLogger(config.Logging, config.OutputDir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			resultErr = fmt.Errorf("catalog panic: %v", recovered)
+			logger.error("panic", "unexpected panic was recovered", resultErr, map[string]any{"stack": string(debug.Stack())})
+		}
+		if resultErr != nil {
+			logger.error("run_failed", "catalog run failed", resultErr, nil)
+		}
+		if closeErr := logger.close(); closeErr != nil {
+			resultErr = errors.Join(resultErr, closeErr)
+		}
+	}()
+	logger.info("run_started", "catalog run started", map[string]any{"output_dir": config.OutputDir, "endpoint": config.Endpoint, "selections": len(config.Selections)})
+	endpointURL, err := url.Parse(config.Endpoint)
+	if err != nil || endpointURL.Host == "" || (endpointURL.Scheme != "http" && endpointURL.Scheme != "https") {
+		return fmt.Errorf("endpoint must be an absolute http(s) URL, got %q", config.Endpoint)
+	}
+
+	if config.Scan.PageSize < 1 || config.Scan.PageSize > 1000 {
+		return fmt.Errorf("scan.page_size must be between 1 and 1000, got %d", config.Scan.PageSize)
+	}
+	if config.Scan.MaxPages < 0 {
+		return fmt.Errorf("scan.max_pages cannot be negative, got %d", config.Scan.MaxPages)
+	}
+	if config.Scan.TimeoutSeconds <= 0 {
+		return fmt.Errorf("scan.timeout_seconds must be positive, got %d", config.Scan.TimeoutSeconds)
+	}
+	if config.Owners.Workers < 1 || config.Owners.Workers > 64 {
+		return fmt.Errorf("owners.workers must be between 1 and 64, got %d", config.Owners.Workers)
+	}
+	if config.Scan.Retries == nil || *config.Scan.Retries < 0 || *config.Scan.Retries > 20 {
+		return errors.New("scan.retries must be between 0 and 20")
 	}
 	now := time.Now().UTC()
 	if config.Scan.Now != "" {
@@ -735,6 +839,11 @@ func runCatalog(ctx context.Context, config catalogConfig) error {
 		return err
 	}
 	client := &httpClient{client: &http.Client{Timeout: time.Duration(config.Scan.TimeoutSeconds) * time.Second}, token: os.Getenv("HF_TOKEN"), retries: *config.Scan.Retries}
+	client.log = func(level, event, message string, fields map[string]any) {
+		if level != "debug" || config.Logging.HTTPRequests {
+			logger.log(level, event, message, fields)
+		}
+	}
 	address := catalogAPIURL(config.Endpoint, config.Scan.PageSize)
 	models := make([]catalogModel, 0)
 	pages, scanned := 0, 0
@@ -742,11 +851,11 @@ func runCatalog(ctx context.Context, config catalogConfig) error {
 	for address != "" {
 		body, headers, err := client.get(ctx, address, false)
 		if err != nil {
-			return err
+			return fmt.Errorf("fetch model catalog page %d: %w", pages+1, err)
 		}
 		var page []catalogModel
 		if err := json.Unmarshal(body, &page); err != nil {
-			return err
+			return fmt.Errorf("decode model catalog page %d: %w", pages+1, err)
 		}
 		if len(page) == 0 {
 			complete = true
@@ -756,30 +865,43 @@ func runCatalog(ctx context.Context, config catalogConfig) error {
 		scanned += len(page)
 		reachedOlder := false
 		for _, model := range page {
+			if strings.TrimSpace(model.ID) == "" {
+				logger.warn("model_skipped", "model has an empty repository id", map[string]any{"reason": "empty_repo_id", "page": pages})
+				continue
+			}
 			created, err := time.Parse(time.RFC3339Nano, model.CreatedAt)
 			if err != nil {
+				logger.warn("model_skipped", "model has an invalid createdAt timestamp", map[string]any{"repo_id": model.ID, "created_at": model.CreatedAt, "reason": "invalid_created_at", "error": err.Error()})
 				continue
 			}
 			if created.Before(earliest) {
 				reachedOlder = true
+				if config.Logging.SkippedRecords {
+					logger.debug("model_skipped", "model is older than the scan window", map[string]any{"repo_id": model.ID, "reason": "older_than_window"})
+				}
 				continue
 			}
 			if created.After(now) {
+				logger.warn("model_skipped", "model creation time is in the future", map[string]any{"repo_id": model.ID, "created_at": model.CreatedAt, "effective_now": now.Format(time.RFC3339Nano), "reason": "future_created_at"})
 				continue
 			}
 			if boolValue(config.Scan.RequireWeights, true) && model.Safetensors.Total <= 0 && !hasRecognizedWeight(model.Siblings) {
+				if config.Logging.SkippedRecords {
+					logger.debug("model_skipped", "model has no recognized weight file", map[string]any{"repo_id": model.ID, "reason": "no_supported_weight_file"})
+				}
 				continue
 			}
 			models = append(models, model)
 		}
 		if !config.Scan.Quiet {
-			fmt.Fprintf(os.Stderr, "catalog pages=%d scanned=%d retained=%d\n", pages, scanned, len(models))
+			logger.info("scan_progress", "catalog page processed", map[string]any{"pages": pages, "scanned": scanned, "retained": len(models)})
 		}
 		if reachedOlder {
 			complete = true
 			break
 		}
 		if config.Scan.MaxPages > 0 && pages >= config.Scan.MaxPages {
+			logger.warn("scan_truncated", "scan stopped at configured max_pages", map[string]any{"max_pages": config.Scan.MaxPages, "scanned": scanned})
 			break
 		}
 		address = nextLink(headers)
@@ -795,7 +917,7 @@ func runCatalog(ctx context.Context, config catalogConfig) error {
 				continue
 			}
 			for _, selection := range selections {
-				if selection.config.MinParametersB == nil && selection.config.MaxParametersB == nil {
+				if selection.config.MinParametersB == nil && selection.config.MaxParametersB == nil && len(selection.config.ComputeProfiles) == 0 {
 					continue
 				}
 				withoutRange := selection
@@ -815,7 +937,7 @@ func runCatalog(ctx context.Context, config catalogConfig) error {
 		baseIDs = append(baseIDs, id)
 	}
 	sort.Strings(baseIDs)
-	baseParams := fetchBaseParameters(ctx, client, config.Endpoint, baseIDs, config.Owners.Workers)
+	baseParams, baseErrors := fetchBaseParameters(ctx, client, config.Endpoint, baseIDs, config.Owners.Workers, logger)
 
 	var records []catalogRecord
 	computeProfiles := make(map[string]computeProfile, len(config.Compute))
@@ -825,9 +947,9 @@ func runCatalog(ctx context.Context, config catalogConfig) error {
 	for _, selection := range selections {
 		var selected []catalogRecord
 		for _, model := range models {
-			params := effectiveParameters(model, baseParams)
+			params, parameterError := effectiveParameters(model, baseParams, baseErrors)
 			if matchesSelection(model, selection, params) {
-				selected = append(selected, modelToRecord(config.Endpoint, model, selection.config, params, computeProfiles))
+				selected = append(selected, modelToRecord(config.Endpoint, model, selection.config, params, parameterError, computeProfiles))
 			}
 		}
 		sort.SliceStable(selected, func(i, j int) bool {
@@ -855,7 +977,7 @@ func runCatalog(ctx context.Context, config catalogConfig) error {
 	sort.Strings(ownerNames)
 	owners := make(map[string]*ownerOverview)
 	if boolValue(config.Owners.Enabled, true) {
-		owners = fetchOwners(ctx, client, config.Endpoint, ownerNames, config.Owners.Workers)
+		owners = fetchOwners(ctx, client, config.Endpoint, ownerNames, config.Owners.Workers, logger)
 	}
 
 	filtered := records[:0]
@@ -924,47 +1046,81 @@ func runCatalog(ctx context.Context, config catalogConfig) error {
 		sort.Strings(owners[owner].Selections)
 	}
 
-	if err := os.MkdirAll(config.OutputDir, 0o755); err != nil {
-		return err
-	}
 	if err := writeCatalogModels(config.OutputDir, records); err != nil {
-		return err
+		return fmt.Errorf("write model outputs: %w", err)
 	}
 	if err := writeCatalogOwners(config.OutputDir, owners); err != nil {
-		return err
+		return fmt.Errorf("write owner outputs: %w", err)
 	}
 	summary := buildCatalogSummary(now, complete, pages, scanned, records, config.Selections)
-	data, _ := json.MarshalIndent(summary, "", "  ")
-	if err := os.WriteFile(filepath.Join(config.OutputDir, "summary.json"), append(data, '\n'), 0o644); err != nil {
-		return err
+	if err := writeJSONFile(filepath.Join(config.OutputDir, "summary.json"), summary); err != nil {
+		return fmt.Errorf("write summary output: %w", err)
 	}
-	fmt.Printf("Catalog complete=%t pages=%d scanned=%d selected=%d owners=%d\n", complete, pages, scanned, len(records), len(owners))
-	fmt.Printf("Output: %s\n", config.OutputDir)
+	logger.info("run_completed", "catalog run completed", map[string]any{"complete": complete, "pages": pages, "scanned": scanned, "selected": len(records), "owners": len(owners)})
+	if _, err := fmt.Printf("Catalog complete=%t pages=%d scanned=%d selected=%d owners=%d\n", complete, pages, scanned, len(records), len(owners)); err != nil {
+		return fmt.Errorf("write completion message to stdout: %w", err)
+	}
+	if _, err := fmt.Printf("Output: %s\n", config.OutputDir); err != nil {
+		return fmt.Errorf("write output path to stdout: %w", err)
+	}
 	return nil
 }
 
-func writeCatalogModels(directory string, records []catalogRecord) error {
-	data, _ := json.MarshalIndent(records, "", "  ")
-	if err := os.WriteFile(filepath.Join(directory, "models.json"), append(data, '\n'), 0o644); err != nil {
-		return err
-	}
-	file, err := os.Create(filepath.Join(directory, "models.csv"))
+func writeJSONFile(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
+		return fmt.Errorf("encode JSON for %q: %w", path, err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write %q: %w", path, err)
+	}
+	return nil
+}
+
+func closeFileAfterError(file *os.File, path string, cause error) error {
+	if closeErr := file.Close(); closeErr != nil {
+		return errors.Join(cause, fmt.Errorf("close %q after failure: %w", path, closeErr))
+	}
+	return cause
+}
+
+func writeCatalogModels(directory string, records []catalogRecord) error {
+	if err := writeJSONFile(filepath.Join(directory, "models.json"), records); err != nil {
 		return err
 	}
-	defer file.Close()
+	path := filepath.Join(directory, "models.csv")
+	file, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create %q: %w", path, err)
+	}
 	w := csv.NewWriter(file)
-	defer w.Flush()
-	_ = w.Write([]string{"selection", "repo_id", "repo_url", "owner", "owner_type", "created_at", "last_modified", "pipeline_tag", "library_name", "model_kind", "base_model", "own_parameters", "effective_parameters", "parameters_b", "downloads", "likes", "tags", "compute_estimates_json"})
+	if err := w.Write([]string{"selection", "repo_id", "repo_url", "owner", "owner_type", "created_at", "last_modified", "pipeline_tag", "library_name", "model_kind", "base_model", "own_parameters", "effective_parameters", "parameters_b", "downloads", "likes", "tags", "compute_estimates_json", "errors"}); err != nil {
+		return closeFileAfterError(file, path, fmt.Errorf("write header to %q: %w", path, err))
+	}
 	for _, r := range records {
 		p := ""
 		if r.ParametersB != nil {
 			p = strconv.FormatFloat(*r.ParametersB, 'f', 6, 64)
 		}
-		computeJSON, _ := json.Marshal(r.Compute)
-		_ = w.Write([]string{r.Selection, r.RepoID, r.RepoURL, r.Owner, r.OwnerType, r.CreatedAt, r.LastModified, r.PipelineTag, r.LibraryName, r.ModelKind, r.BaseModel, strconv.FormatInt(r.OwnParameters, 10), strconv.FormatInt(r.EffectiveParameters, 10), p, strconv.FormatInt(r.Downloads, 10), strconv.FormatInt(r.Likes, 10), strings.Join(r.Tags, "|"), string(computeJSON)})
+		computeJSON, err := json.Marshal(r.Compute)
+		if err != nil {
+			return closeFileAfterError(file, path, fmt.Errorf("encode compute estimates for %q: %w", r.RepoID, err))
+		}
+		if err := w.Write([]string{r.Selection, r.RepoID, r.RepoURL, r.Owner, r.OwnerType, r.CreatedAt, r.LastModified, r.PipelineTag, r.LibraryName, r.ModelKind, r.BaseModel, strconv.FormatInt(r.OwnParameters, 10), strconv.FormatInt(r.EffectiveParameters, 10), p, strconv.FormatInt(r.Downloads, 10), strconv.FormatInt(r.Likes, 10), strings.Join(r.Tags, "|"), string(computeJSON), strings.Join(r.Errors, " | ")}); err != nil {
+			return closeFileAfterError(file, path, fmt.Errorf("write model %q to %q: %w", r.RepoID, path, err))
+		}
 	}
-	return w.Error()
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return closeFileAfterError(file, path, fmt.Errorf("flush %q: %w", path, err))
+	}
+	if err := file.Sync(); err != nil {
+		return closeFileAfterError(file, path, fmt.Errorf("sync %q: %w", path, err))
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close %q: %w", path, err)
+	}
+	return nil
 }
 
 func writeCatalogOwners(directory string, owners map[string]*ownerOverview) error {
@@ -980,22 +1136,34 @@ func writeCatalogOwners(directory string, owners map[string]*ownerOverview) erro
 		}
 		return list[i].Downloads > list[j].Downloads
 	})
-	data, _ := json.MarshalIndent(list, "", "  ")
-	if err := os.WriteFile(filepath.Join(directory, "owners.json"), append(data, '\n'), 0o644); err != nil {
+	if err := writeJSONFile(filepath.Join(directory, "owners.json"), list); err != nil {
 		return err
 	}
-	file, err := os.Create(filepath.Join(directory, "owners.csv"))
+	path := filepath.Join(directory, "owners.csv")
+	file, err := os.Create(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("create %q: %w", path, err)
 	}
-	defer file.Close()
 	w := csv.NewWriter(file)
-	defer w.Flush()
-	_ = w.Write([]string{"owner", "owner_type", "profile_url", "fullname", "verified", "pro", "plan", "followers", "models", "datasets", "spaces", "papers", "members", "created_at", "details", "selected_repos", "selected_downloads", "selected_likes", "selections", "error"})
-	for _, o := range list {
-		_ = w.Write([]string{o.Name, o.Type, "https://huggingface.co/" + o.Name, o.Fullname, strconv.FormatBool(o.IsVerified), strconv.FormatBool(o.IsPro), o.Plan, strconv.FormatInt(o.NumFollowers, 10), strconv.FormatInt(o.NumModels, 10), strconv.FormatInt(o.NumDatasets, 10), strconv.FormatInt(o.NumSpaces, 10), strconv.FormatInt(o.NumPapers, 10), strconv.FormatInt(o.NumUsers, 10), o.CreatedAt, o.Details, strconv.FormatInt(o.SelectedRepos, 10), strconv.FormatInt(o.Downloads, 10), strconv.FormatInt(o.Likes, 10), strings.Join(o.Selections, "|"), o.Error})
+	if err := w.Write([]string{"owner", "owner_type", "profile_url", "fullname", "verified", "pro", "plan", "followers", "models", "datasets", "spaces", "papers", "members", "created_at", "details", "selected_repos", "selected_downloads", "selected_likes", "selections", "error"}); err != nil {
+		return closeFileAfterError(file, path, fmt.Errorf("write header to %q: %w", path, err))
 	}
-	return w.Error()
+	for _, o := range list {
+		if err := w.Write([]string{o.Name, o.Type, "https://huggingface.co/" + o.Name, o.Fullname, strconv.FormatBool(o.IsVerified), strconv.FormatBool(o.IsPro), o.Plan, strconv.FormatInt(o.NumFollowers, 10), strconv.FormatInt(o.NumModels, 10), strconv.FormatInt(o.NumDatasets, 10), strconv.FormatInt(o.NumSpaces, 10), strconv.FormatInt(o.NumPapers, 10), strconv.FormatInt(o.NumUsers, 10), o.CreatedAt, o.Details, strconv.FormatInt(o.SelectedRepos, 10), strconv.FormatInt(o.Downloads, 10), strconv.FormatInt(o.Likes, 10), strings.Join(o.Selections, "|"), o.Error}); err != nil {
+			return closeFileAfterError(file, path, fmt.Errorf("write owner %q to %q: %w", o.Name, path, err))
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return closeFileAfterError(file, path, fmt.Errorf("flush %q: %w", path, err))
+	}
+	if err := file.Sync(); err != nil {
+		return closeFileAfterError(file, path, fmt.Errorf("sync %q: %w", path, err))
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close %q: %w", path, err)
+	}
+	return nil
 }
 
 func buildCatalogSummary(now time.Time, complete bool, pages, scanned int, records []catalogRecord, selections []selectionConfig) catalogSummary {

@@ -84,6 +84,7 @@ type httpClient struct {
 	client  *http.Client
 	token   string
 	retries int
+	log     func(level, event, message string, fields map[string]any)
 }
 
 type pageItem struct {
@@ -99,10 +100,14 @@ type classifiedItem struct {
 
 func (c *httpClient) get(ctx context.Context, address string, allowMissing bool) ([]byte, http.Header, error) {
 	for attempt := 0; attempt <= c.retries; attempt++ {
+		started := time.Now()
+		if c.log != nil {
+			c.log("debug", "http_request", "sending HTTP request", map[string]any{"method": http.MethodGet, "url": address, "attempt": attempt + 1})
+		}
 		serverDelay := time.Duration(0)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("create GET request for %q: %w", address, err)
 		}
 		req.Header.Set("User-Agent", userAgent)
 		req.Header.Set("Accept", "application/json, text/plain;q=0.9")
@@ -112,21 +117,39 @@ func (c *httpClient) get(ctx context.Context, address string, allowMissing bool)
 		resp, err := c.client.Do(req)
 		if err == nil {
 			body, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
+			closeErr := resp.Body.Close()
 			if readErr != nil {
-				err = readErr
+				err = fmt.Errorf("read response body from %q: %w", address, readErr)
+				if closeErr != nil {
+					err = errors.Join(err, fmt.Errorf("close response body from %q: %w", address, closeErr))
+				}
+			} else if closeErr != nil {
+				err = fmt.Errorf("close response body: %w", closeErr)
 			} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				if c.log != nil {
+					c.log("debug", "http_response", "HTTP request succeeded", map[string]any{"method": http.MethodGet, "url": address, "attempt": attempt + 1, "status": resp.StatusCode, "bytes": len(body), "duration_ms": time.Since(started).Milliseconds()})
+				}
 				return body, resp.Header, nil
 			} else if allowMissing && (resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 404) {
+				if c.log != nil {
+					c.log("debug", "http_missing", "optional resource is unavailable", map[string]any{"method": http.MethodGet, "url": address, "status": resp.StatusCode})
+				}
 				return nil, resp.Header, nil
 			} else if !retryableStatus(resp.StatusCode) {
-				return nil, resp.Header, fmt.Errorf("GET %s: HTTP %s", address, resp.Status)
+				err = fmt.Errorf("GET %s: HTTP %s", address, resp.Status)
+				if c.log != nil {
+					c.log("error", "http_error", "HTTP request failed without retry", map[string]any{"url": address, "status": resp.StatusCode, "attempt": attempt + 1, "error": err.Error()})
+				}
+				return nil, resp.Header, err
 			} else {
 				err = fmt.Errorf("GET %s: HTTP %s", address, resp.Status)
 				serverDelay = rateLimitDelay(resp.Header)
 			}
 		}
 		if attempt == c.retries {
+			if c.log != nil {
+				c.log("error", "http_retries_exhausted", "HTTP request failed after all attempts", map[string]any{"url": address, "attempts": attempt + 1, "error": fmt.Sprint(err)})
+			}
 			return nil, nil, err
 		}
 		delay := time.Duration(1<<attempt) * time.Second
@@ -134,8 +157,14 @@ func (c *httpClient) get(ctx context.Context, address string, allowMissing bool)
 			delay = serverDelay
 		}
 		delay += time.Duration(rand.Intn(250)) * time.Millisecond
+		if c.log != nil {
+			c.log("warn", "http_retry", "HTTP request will be retried", map[string]any{"url": address, "attempt": attempt + 1, "delay_ms": delay.Milliseconds(), "error": fmt.Sprint(err)})
+		}
 		select {
 		case <-ctx.Done():
+			if c.log != nil {
+				c.log("error", "http_canceled", "HTTP retry canceled by context", map[string]any{"url": address, "error": ctx.Err().Error()})
+			}
 			return nil, nil, ctx.Err()
 		case <-time.After(delay):
 		}
@@ -391,7 +420,7 @@ func increment(target map[int]map[string]int, year int, key string) {
 	target[year][key]++
 }
 
-func run(ctx context.Context, opts options) error {
+func run(ctx context.Context, opts options) (resultErr error) {
 	if err := os.MkdirAll(opts.Output, 0o755); err != nil {
 		return err
 	}
@@ -401,9 +430,19 @@ func run(ctx context.Context, opts options) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 	writer := csv.NewWriter(file)
-	defer writer.Flush()
+	defer func() {
+		writer.Flush()
+		if err := writer.Error(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("flush %q: %w", detailsPath, err))
+		}
+		if err := file.Sync(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("sync %q: %w", detailsPath, err))
+		}
+		if err := file.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close %q: %w", detailsPath, err))
+		}
+	}()
 	if err := writer.Write([]string{"year", "repo_id", "created_at", "status", "reason", "evidence"}); err != nil {
 		return err
 	}
@@ -484,7 +523,9 @@ func run(ctx context.Context, opts options) error {
 			for _, year := range opts.Years {
 				parts = append(parts, fmt.Sprintf("%d: confirmed=%d, candidate=%d", year, counts[year]["confirmed"], counts[year]["candidate"]))
 			}
-			fmt.Fprintf(os.Stderr, "pages=%d; %s\n", pages, strings.Join(parts, ", "))
+			if _, err := fmt.Fprintf(os.Stderr, "pages=%d; %s\n", pages, strings.Join(parts, ", ")); err != nil {
+				return fmt.Errorf("write progress to stderr: %w", err)
+			}
 		}
 		if opts.MaxPages > 0 && pages >= opts.MaxPages {
 			break
@@ -502,9 +543,13 @@ func run(ctx context.Context, opts options) error {
 		return err
 	}
 	for _, year := range opts.Years {
-		fmt.Printf("%d: confirmed=%d; candidates=%d; broad_upper_bound=%d\n", year, counts[year]["confirmed"], counts[year]["candidate"], counts[year]["confirmed"]+counts[year]["candidate"])
+		if _, err := fmt.Printf("%d: confirmed=%d; candidates=%d; broad_upper_bound=%d\n", year, counts[year]["confirmed"], counts[year]["candidate"], counts[year]["confirmed"]+counts[year]["candidate"]); err != nil {
+			return fmt.Errorf("write yearly result to stdout: %w", err)
+		}
 	}
-	fmt.Printf("Details: %s\nSummary: %s\n", detailsPath, summaryPath)
+	if _, err := fmt.Printf("Details: %s\nSummary: %s\n", detailsPath, summaryPath); err != nil {
+		return fmt.Errorf("write output paths to stdout: %w", err)
+	}
 	return nil
 }
 

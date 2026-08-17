@@ -1,7 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -168,5 +172,55 @@ func TestRateLimitDelay(t *testing.T) {
 	header.Set("RateLimit", `"api";r=0;t=42`)
 	if got := rateLimitDelay(header); got != 43*time.Second {
 		t.Fatalf("rateLimitDelay() = %s", got)
+	}
+}
+
+func TestCatalogScenarioConfigIsValid(t *testing.T) {
+	data, err := os.ReadFile("catalog.scenarios.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config catalogConfig
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&config); err != nil {
+		t.Fatalf("decode catalog.scenarios.json: %v", err)
+	}
+	applyCatalogDefaults(&config)
+	if _, _, err := compileSelections(config, time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("compile catalog.scenarios.json: %v", err)
+	}
+	if len(config.Selections) < 10 {
+		t.Fatalf("scenario config has only %d selections", len(config.Selections))
+	}
+}
+
+func TestCatalogLoggerWritesJSONLAndFiltersLevels(t *testing.T) {
+	stderr := false
+	directory := t.TempDir()
+	logger, err := newCatalogLogger(catalogLoggingConfig{Level: "info", File: "run.jsonl", Stderr: &stderr}, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.debug("hidden", "must not be written", nil)
+	logger.warn("visible", "warning text", map[string]any{"repo_id": "org/model"})
+	if err := logger.close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(directory, "run.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "hidden") || !strings.Contains(text, `"event":"visible"`) || !strings.Contains(text, `"repo_id":"org/model"`) {
+		t.Fatalf("unexpected log content: %s", text)
+	}
+}
+
+func TestAdapterParameterResolutionErrorIsPreserved(t *testing.T) {
+	model := catalogModel{ID: "org/adapter", BaseModels: catalogBaseModels{Relation: "adapter", Models: []catalogBaseModel{{ID: "org/base"}}}}
+	parameters, message := effectiveParameters(model, nil, map[string]string{"org/base": "metadata unavailable"})
+	if parameters != 0 || message != "metadata unavailable" {
+		t.Fatalf("effectiveParameters() = %d, %q", parameters, message)
 	}
 }

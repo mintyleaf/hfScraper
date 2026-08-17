@@ -1,6 +1,13 @@
 {
   "endpoint": "https://huggingface.co",
   "output_dir": "catalog-results",
+  "logging": {
+    "level": "info",
+    "file": "catalog.log.jsonl",
+    "stderr": true,
+    "http_requests": false,
+    "skipped_records": false
+  },
   "scan": {
     "now": "",
     "page_size": 1000,
@@ -18,6 +25,7 @@
   "compute_profiles": [
     {
       "name": "h100_1000x1",
+      "description": "1000 машин по одной H100",
       "gpu_name": "NVIDIA H100",
       "gpu_tflops": 989,
       "efficiency": 0.4,
@@ -29,6 +37,7 @@
     },
     {
       "name": "h100_256x4",
+      "description": "256 машин по четыре H100; всего 1024 GPU",
       "gpu_name": "NVIDIA H100",
       "gpu_tflops": 989,
       "efficiency": 0.4,

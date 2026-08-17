@@ -32,6 +32,7 @@ gated repositories. В результаты токен не записывает
 
 - `endpoint` — Hub URL. Default: `https://huggingface.co`.
 - `output_dir` — директория результатов. Default: `catalog-results`.
+- `logging` — уровни и место записи диагностики.
 - `scan` — настройки общего прохода API.
 - `owners` — настройки профилей владельцев.
 - `compute_profiles` — массив GPU-кластеров.
@@ -105,8 +106,9 @@ Default: true.
 ### scan.resolve_base_parameters
 
 Boolean. Получает `safetensors.total` базовой модели для adapter-кандидатов,
-которые участвуют в selections с `min_parameters_b` или `max_parameters_b`.
-Благодаря этому LoRA для 70B базы фильтруется как 70B, а не по размеру adapter.
+которые участвуют в selections с диапазоном параметров или compute-профилем.
+Благодаря этому LoRA для 70B базы фильтруется и оценивается как 70B, а не по
+размеру adapter.
 
 Default: true.
 
@@ -118,7 +120,7 @@ Default: 30.
 
 ### scan.retries
 
-Неотрицательный integer. Число повторов после временной ошибки. `0` отключает
+Integer от 0 до 20. Число повторов после временной ошибки. `0` отключает
 повторы. При HTTP 429 клиент учитывает `Retry-After` и Hugging Face `RateLimit`.
 
 Default: 5.
@@ -126,6 +128,55 @@ Default: 5.
 ### scan.quiet
 
 Boolean. `true` отключает промежуточный прогресс.
+
+Default: false.
+
+## 3A. Все опции logging
+
+```json
+"logging": {
+  "level": "info",
+  "file": "catalog.log.jsonl",
+  "stderr": true,
+  "http_requests": false,
+  "skipped_records": false
+}
+```
+
+### logging.level
+
+Минимальный сохраняемый уровень: `debug`, `info`, `warn` или `error`.
+
+Default: `info`.
+
+### logging.file
+
+JSONL-файл лога. Относительный путь считается от `output_dir`, абсолютный
+используется как есть. Каждая строка является отдельным JSON-объектом с полями
+`time`, `level`, `event`, `message` и контекстом события.
+
+Default: `catalog.log.jsonl`.
+
+### logging.stderr
+
+При `true` события также печатаются в stderr в человекочитаемом виде. JSONL-файл
+создаётся независимо от этого значения.
+
+Default: true.
+
+### logging.http_requests
+
+При `true` добавляет debug-события каждого HTTP-запроса: URL, попытку, статус,
+размер ответа и длительность. Повторы и окончательные HTTP-ошибки логируются и
+при `false`. Для успешных запросов также требуется `level: "debug"`.
+
+Default: false.
+
+### logging.skipped_records
+
+При `true` добавляет debug-события для обычных исключений: модель старше окна
+или без распознанных весов. Некорректные даты и даты из будущего всегда являются
+`warn`. Для обычных исключений также требуется `level: "debug"`.
 
 Default: false.
 
@@ -159,6 +210,7 @@ Default: 8.
 ```json
 {
   "name": "h100_256x4",
+  "description": "256 машин по четыре H100",
   "gpu_name": "NVIDIA H100",
   "gpu_tflops": 989,
   "efficiency": 0.4,
@@ -173,6 +225,10 @@ Default: 8.
 ### name
 
 Обязательный уникальный string. Selection ссылается на профиль по этому имени.
+
+### description
+
+Необязательное описание профиля. На формулу не влияет.
 
 ### gpu_name
 
@@ -207,7 +263,7 @@ Integer больше нуля. GPU в одной машине. Total GPUs рав
 
 ### finetune_compute_fraction
 
-Неотрицательный number. Compute-множитель для `finetune` и `adapter`:
+Number от 0 до 1. Compute-множитель для `finetune` и `adapter`:
 
 - `0.01` — 1% полного обучения;
 - `0.05` — 5%;
@@ -433,6 +489,7 @@ compute estimates.
 - `downloads`, `likes`;
 - `tags` с разделителем `|`;
 - `compute_estimates_json` — JSON-массив внутри CSV-ячейки.
+- `errors` — нефатальные проблемы конкретной записи, разделённые ` | `.
 
 Одна модель может иметь несколько строк, если входит в несколько selections.
 
@@ -470,6 +527,31 @@ Owner aggregates дедуплицируются по repo, даже если rep
 `owner_types`, `model_kinds`, `known_parameters`, `total_downloads`, `total_likes`.
 Selections с нулём совпадений тоже присутствуют.
 
+### catalog.log.jsonl
+
+Структурированный журнал запуска. Имя и местоположение меняются через
+`logging.file`. Токен `HF_TOKEN` в события не записывается.
+
+## 11A. Что происходит при ошибках
+
+Фатальные ошибки завершают процесс с ненулевым exit code. К ним относятся:
+невалидный JSON или неизвестная опция, некорректные диапазоны, невозможность
+получить или декодировать страницу каталога, отмена context, а также ошибка
+создания, кодирования, записи, flush, sync или закрытия выходного файла.
+
+Восстановимые ошибки не обрывают всю многотысячную выборку:
+
+- невалидный `createdAt` отбрасывает конкретную модель и создаёт `warn`;
+- неудачное получение параметров base-модели создаёт `warn`, а причина попадает
+  в `models.json` и колонку `errors`, если запись допускает неизвестный размер;
+- неудачный owner enrichment создаёт `warn`, оставляет тип `unknown` и сохраняет
+  причину в поле/колонке owner `error`;
+- временные HTTP-ошибки повторяются с backoff; каждая повторная попытка имеет
+  событие `http_retry`, исчерпание попыток — `http_retries_exhausted`.
+
+Неожиданная panic перехватывается на границе catalog-run, сохраняется вместе со
+stack trace как событие `panic`, после чего процесс возвращает ошибку.
+
 ## 12. Complete и воспроизводимость
 
 Для финальной выборки требуется `complete: true`. `false` означает остановку до
@@ -479,6 +561,21 @@ Selections с нулём совпадений тоже присутствуют.
 могут меняться независимо от фиксированного периода.
 
 ## 13. Практические selections
+
+Готовый большой набор находится в `catalog.scenarios.json`. Он содержит popular
+LLM, отдельные base/fine-tune/adapter выборки, диапазоны 1–3B, 7–14B, 30–40B и
+64–128B, разрезы user/organization, code-модели, календарный 2025 год и четыре
+варианта кластера.
+
+Полный запуск:
+
+```bash
+go run . catalog --config catalog.scenarios.json
+```
+
+Для эксперимента скопируйте файл, удалите ненужные элементы из `selections` и
+задайте отдельный `output_dir`. Все selections выполняются за один общий проход
+Hub, поэтому десяток сценариев не означает десяток полных скачиваний каталога.
 
 ### Top-100 LLM за год
 
