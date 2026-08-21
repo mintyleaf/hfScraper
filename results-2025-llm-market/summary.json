@@ -1,0 +1,96 @@
+{
+  "generated_at": "2026-08-21T01:07:20.217210526Z",
+  "effective_now": "2026-08-21T00:49:46.732504082Z",
+  "complete": true,
+  "pages_scanned": 1846,
+  "models_scanned": 1846000,
+  "reported_compute_candidates": 287952,
+  "reported_compute_resolved": 699,
+  "reported_compute_ignored": 287253,
+  "scratch_claim_candidates": 94151,
+  "scratch_claims_resolved": 3958,
+  "scratch_claims_ignored": 90193,
+  "retained_weight_repositories": 902093,
+  "selections": {
+    "public_text_llm_2025": {
+      "description": "Public 2025 text LLM repositories with weights; confirmed independent base runs use formula.txt and derivatives receive cost only when their own compute/cost is reported",
+      "models": 447533,
+      "unique_owners": 64688,
+      "owner_types": {
+        "unknown": 447533
+      },
+      "model_kinds": {
+        "adapter": 51504,
+        "base": 94129,
+        "finetune": 142304,
+        "fork": 28895,
+        "merge": 11319,
+        "quantized": 119382
+      },
+      "known_parameters": 227688,
+      "total_downloads": 309184434,
+      "total_likes": 331594,
+      "known_training_costs": 1094,
+      "total_training_cost_usd": 50545833.34489301,
+      "formula_20tpp_moe_active_hybrid_total_usd": 20571760.428221725,
+      "formula_20tpp_literal_total_parameters_total_usd": 271571788.25919855,
+      "costed_models_by_kind": {
+        "adapter": 215,
+        "base": 545,
+        "finetune": 334
+      },
+      "training_cost_by_kind_usd": {
+        "adapter": 4663.410553711112,
+        "base": 48699290.19326996,
+        "finetune": 1841879.7410692943
+      },
+      "costed_models_by_method": {
+        "formula_txt_moe_active_parameter_scaling": 21,
+        "formula_txt_parameter_scaling": 427,
+        "gpu_hours_x_hourly_rate": 540,
+        "reported_pretraining_tokens_active_parameters": 9,
+        "reported_pretraining_tokens_total_parameters": 88,
+        "reported_total_cost": 9
+      },
+      "training_cost_by_method_usd": {
+        "formula_txt_moe_active_parameter_scaling": 7505728.931115106,
+        "formula_txt_parameter_scaling": 2298144.590055723,
+        "gpu_hours_x_hourly_rate": 1837252.0416230059,
+        "reported_pretraining_tokens_active_parameters": 9783114.256825075,
+        "reported_pretraining_tokens_total_parameters": 29112302.41527403,
+        "reported_total_cost": 9291.11
+      },
+      "base_models_by_parameter_range": {
+        "120-\u003c500B": 94,
+        "13-\u003c34B": 5279,
+        "2-\u003c7B": 10840,
+        "34-\u003c70B": 75,
+        "7-\u003c13B": 11495,
+        "70-\u003c120B": 371,
+        "\u003c2B": 47335,
+        "\u003e=500B": 65,
+        "unknown": 18575
+      },
+      "costed_base_models_by_parameter_range": {
+        "120-\u003c500B": 4,
+        "13-\u003c34B": 23,
+        "2-\u003c7B": 47,
+        "34-\u003c70B": 8,
+        "7-\u003c13B": 37,
+        "70-\u003c120B": 6,
+        "\u003c2B": 418,
+        "\u003e=500B": 2
+      },
+      "base_training_cost_by_parameter_range_usd": {
+        "120-\u003c500B": 4418596.43015032,
+        "13-\u003c34B": 11716336.65555582,
+        "2-\u003c7B": 3025085.85465763,
+        "34-\u003c70B": 2270757.6077704187,
+        "7-\u003c13B": 8348937.650558234,
+        "70-\u003c120B": 11110221.916423,
+        "\u003c2B": 1273803.3720718708,
+        "\u003e=500B": 6535550.706082642
+      }
+    }
+  }
+}

@@ -33,13 +33,25 @@ var (
 	// These files share weight-like extensions but contain tokenizers or trainer state.
 	nonWeightArtifactRE = regexp.MustCompile(`(?i)(^|/)(tokenizer|tokenizer_model|spiece|sentencepiece|vocab)([-_.].*)?\.(bin|pt|pth|pkl|pickle|npz)$|(?i)(^|/)(training_args\.bin|optimizer\.pt|scheduler\.pt|scaler\.pt|rng_state[^/]*\.pth)$`)
 
-	positiveScratchRE = regexp.MustCompile(`(?is)\b(pre[- ]?trained|trained|training|built)\b.{0,80}\bfrom scratch\b|\bfrom scratch\b.{0,80}\b(pre[- ]?trained|trained|training|model)\b|\btrain(ed|ing)?\b.{0,80}\bfrom (a )?random(ly)? init(ialization|ialized)?\b|\brandomly initialized\b.{0,80}\btrain(ed|ing)?\b|\btrained\b.{0,80}\bfrom the ground up\b|обуч(ена|ен|ено|ены|али|алась|ался).{0,80}с нуля|\bentraîn(é|ée|ement)\b.{0,80}\b(à partir de zéro|from scratch)\b`)
-	negatedScratchRE  = regexp.MustCompile(`(?is)\b(not|wasn['’]t|isn['’]t|never)\b.{0,35}\b(trained|training|pretrained)\b.{0,35}\bfrom scratch\b|\b(without|no)\b.{0,25}\btraining from scratch\b|не.{0,35}обуч(ена|ен|ено|ены|али|алась|ался).{0,35}с нуля`)
-	derivativeTextRE  = regexp.MustCompile(`(?i)\b(fine[- ]?tun(e|ed|ing)|instruction[- ]?tun(e|ed|ing)|continued pretraining|continual pretraining|domain adaptation|distill(ed|ation)|knowledge distillation|merged? (model|checkpoint)|quantiz(ed|ation)|converted? (from|to)|(lora|qlora|peft) adapter)\b`)
-	nonModelScratchRE = regexp.MustCompile(`(?is)\b(tokenizer|tokeniser|vocab(ulary)?|sentencepiece|bpe)\b.{0,80}\bfrom scratch\b|\bfrom scratch\b.{0,80}\b(tokenizer|tokeniser|vocab(ulary)?|sentencepiece|bpe)\b`)
-	derivativeNameRE  = regexp.MustCompile(`(?i)(^|[-_.])(lora|qlora|adapter|merged?|gguf|gptq|awq|exl2|bnb|int[248]|fp8|finetuned?|fine[-_]?tuned?|sft|dpo)($|[-_.])`)
-	adapterFileRE     = regexp.MustCompile(`(?i)(^|/)(adapter_(model|config)|.*lora.*)\.`)
-	conversionFileRE  = regexp.MustCompile(`(?i)\.(gguf|ggml)$`)
+	positiveScratchRE = regexp.MustCompile(`(?is)\b(pre[- ]?trained|trained)\b.{0,80}\bfrom scratch\b|\bfrom scratch\b.{0,80}\b(pre[- ]?trained|trained)\b|\btrain(ed|ing)?\b.{0,80}\bfrom (a )?random(ly)? init(ialization|ialized)?\b|\brandomly initialized\b.{0,80}\btrain(ed|ing)?\b|\btrained\b.{0,80}\bfrom the ground up\b|обуч(ена|ен|ено|ены|али|алась|ался).{0,80}с нуля|\bentraîn(é|ée)\b.{0,80}\b(à partir de zéro|from scratch)\b`)
+	negatedScratchRE  = regexp.MustCompile(`(?is)\b(not|wasn['’]t|isn['’]t|never|bypass(?:es|ed|ing)?|avoid(?:s|ed|ing)?)\b.{0,80}\b(trained|training|pretrained|pretraining)\b.{0,50}\bfrom scratch\b|\b(without|no)\b.{0,25}\btraining from scratch\b|не.{0,35}обуч(ена|ен|ено|ены|али|алась|ался).{0,35}с нуля`)
+	// Reject scratch claims about an auxiliary component, not about the whole
+	// model.  Bare architecture words such as "decoder" or "ViT" are
+	// deliberately absent: decoder-only LMs and whole vision transformers can
+	// genuinely be trained from scratch.
+	nonModelScratchRE     = regexp.MustCompile(`(?is)\b(tokenizer|tokeniser|токенизатор|vocab(ulary)?|sentencepiece|bpe|vision encoder|visual encoder|visual layers?|projector|projection layer|multimodal projector|embedding layer|channel embeddings?|classification head|decoder (?:layer|module|component|head))\b.{0,100}\b(from scratch|с нуля)\b|\b(from scratch|с нуля)\b.{0,100}\b(tokenizer|tokeniser|токенизатор|vocab(ulary)?|sentencepiece|bpe|vision encoder|visual encoder|visual layers?|projector|projection layer|multimodal projector|embedding layer|channel embeddings?|classification head|decoder (?:layer|module|component|head))\b|\b(?:only\s+)?(?:the\s+)?decoder\b.{0,80}\b(from scratch|с нуля)\b.{0,100}\b(?:encoder|backbone)\b.{0,50}\b(?:frozen|pre[- ]?trained)\b|(?:токенизатор|проектор|слой|эмбеддинг).{0,100}обуч(ен|ена).{0,30}с нуля`)
+	randomComponentInitRE = regexp.MustCompile(`(?is)\b(tokenizer|tokeniser|vocab(?:ulary)?|vision encoder|visual encoder|projector|projection layer|multimodal projector|embedding(?: matrix| layer)?|channel embeddings?|classification head|decoder (?:layer|module|component|head))\b.{0,100}\b(randomly initialized|random initialization|initialized from scratch)\b|\b(randomly initialized|random initialization|initialized from scratch)\b.{0,100}\b(tokenizer|tokeniser|vocab(?:ulary)?|vision encoder|visual encoder|projector|projection layer|multimodal projector|embedding(?: matrix| layer)?|channel embeddings?|classification head|decoder (?:layer|module|component|head))\b`)
+	nonActualScratchRE    = regexp.MustCompile(`(?is)\b(for comparison|compared (?:with|to)|typically|would|could|estimated?|hypothetical|instead of|rather than|versus|vs\.?|example of|recipe for|guide to|how to|difficulty of|allow(?:s|ed|ing)?|demo|notebook|to[- ]?do|ongoing|implement)\b.{0,160}\b(?:train(?:ed|ing)?|pretrain(?:ed|ing)?)?\b.{0,70}\bfrom scratch\b|\b(?:fewer|less)\s+(?:tokens?|flops?|compute|steps?|time)\b.{0,80}\bthan\b.{0,80}\b(?:training|pretraining)\s+from scratch\b|\bwhen\s+(?:training|pretraining)\s+(?:a|an|the|such)\s+(?:model|network|system)\b.{0,100}\bfrom scratch\b|\b(?:pre[- ]?trained|trained)\s+from scratch\s*\(\s*or\s+fine[- ]?tuned\s*\)`)
+	// A generic "the model" elsewhere in a long card may describe a baseline.
+	// Accept it only next to the scratch claim; globally require an unambiguous
+	// reference to this/current/released model.
+	localCurrentModelDerivativeRE = regexp.MustCompile(`(?is)\b(?:this|the|our)\s+(?:model|checkpoint)\s+(?:is|was|has been)\s+(?:(?:further|subsequently|then)\s+)?(?:fine[- ]?tuned|instruction[- ]?tuned|post[- ]?trained|converted|distilled)\b|\bthis\s+(?:model\s+)?(?:is|was)\s+(?:an?\s+)?(?:fine[- ]?tuned|instruction[- ]?tuned|post[- ]?trained|converted|distilled)\s+(?:model|checkpoint|iteration|version)\b|\bas\s+an?\s+(?:fine[- ]?tuned|instruction[- ]?tuned|post[- ]?trained)\s+(?:model|iteration|version)\b`)
+	currentModelDerivativeRE      = regexp.MustCompile(`(?is)\bthis\s+(?:model|checkpoint|iteration|version)\s+(?:is|was|has been)\s+(?:(?:further|subsequently|then)\s+)?(?:fine[- ]?tuned|instruction[- ]?tuned|post[- ]?trained|converted|distilled)\b|\bthis\s+(?:model\s+)?(?:is|was)\s+(?:an?\s+)?(?:fine[- ]?tuned|instruction[- ]?tuned|post[- ]?trained|converted|distilled)\s+(?:model|checkpoint|iteration|version)\b|\b(?:current|released|resulting|final)\s+(?:model|checkpoint|iteration|version)\s+(?:is|was|has been)\s+(?:(?:further|subsequently|then)\s+)?(?:fine[- ]?tuned|instruction[- ]?tuned|post[- ]?trained|converted|distilled)\b`)
+	derivativeSequenceRE          = regexp.MustCompile(`(?is)\b(?:trained|pre[- ]?trained)\b.{0,90}\bfrom scratch\b.{0,220}\b(?:(?:followed by|post[- ]?training included).{0,80}(?:supervised fine[- ]?tuning|instruction fine[- ]?tuning|RLOO|RLHF|QRPO)|(?:then underwent|and (?:was )?)(?:supervised |instruction )?fine[- ]?tuned)\b|\bfrom scratch\b.{0,180}\band (?:was )?(?:supervised |instruction )?fine[- ]?tuned\b|\b(?:supervised fine[- ]?tuning|instruction fine[- ]?tuning|alignment)\b.{0,180}\b(?:trained end[- ]to[- ]end from random initialization|trained from scratch)\b|\b(?:enhanced[,]?\s*)?instruction[- ]?tuned\s+(?:iteration|version)\b`)
+	upstreamScratchRE             = regexp.MustCompile(`(?is)\b(?:based on|initialized from|uses?)\b.{0,120}\bpre[- ]?trained\b.{0,120}\b(?:trained|built)\b.{0,70}\bfrom scratch\b`)
+	derivativeNameRE              = regexp.MustCompile(`(?i)(^|[-_.])(lora|qlora|adapter|merged?|gguf|gptq|awq|exl2|bnb|int[248]|fp8|finetuned?|fine[-_]?tuned?|sft|dpo)($|[-_.])`)
+	adapterFileRE                 = regexp.MustCompile(`(?i)(^|/)(adapter_(model|config)|.*lora.*)\.`)
+	conversionFileRE              = regexp.MustCompile(`(?i)\.(gguf|ggml)$`)
 
 	derivativeTags = map[string]struct{}{
 		"adapter-transformers": {}, "peft": {}, "lora": {}, "qlora": {},
@@ -288,8 +300,12 @@ func classifyREADME(text string) classification {
 		start := max(0, match[0]-100)
 		end := min(len(text), match[1]+100)
 		context := safeSlice(text, start, end)
-		if negatedScratchRE.MatchString(context) || nonModelScratchRE.MatchString(context) || derivativeTextRE.MatchString(context) {
+		wideContext := safeSlice(text, max(0, match[0]-300), min(len(text), match[1]+300))
+		if negatedScratchRE.MatchString(context) || nonModelScratchRE.MatchString(context) || randomComponentInitRE.MatchString(context) || nonActualScratchRE.MatchString(context) || upstreamScratchRE.MatchString(context) || localCurrentModelDerivativeRE.MatchString(context) || derivativeSequenceRE.MatchString(wideContext) {
 			continue
+		}
+		if currentModelDerivativeRE.MatchString(text) {
+			return classification{Status: "excluded", Reason: "current_model_is_derivative"}
 		}
 		evidenceStart := max(0, match[0]-100)
 		evidenceEnd := min(len(text), match[1]+100)

@@ -21,7 +21,7 @@
 
 ## Запуск
 
-Требуется Go 1.22+, внешних библиотек нет.
+Требуется Go 1.24.9+.
 
 ```bash
 go run . --years 2025,2026 --output results
@@ -88,3 +88,57 @@ go run . catalog --config catalog.example.json
 конфигурациях кластера. Полное описание: [CATALOG.md](CATALOG.md).
 
 Совсем пошаговая инструкция для первого запуска: [HOW-TO-RU.md](HOW-TO-RU.md).
+
+### Боевой расчёт стоимости за 2025 год
+
+Подробное описание источников, формул, дедупликации, аудита и ограничений:
+[METHODOLOGY-2025-RU.md](METHODOLOGY-2025-RU.md).
+
+Последний полный LLM-only проход: **$50,545,833.34** H100-equivalent compute
+для 1,094 дедуплицированных training run: 545 base, 334 fine-tune и 215
+adapter/LoRA/QLoRA. В рыночной выборке 447,533 публичных text LLM-репозитория;
+base, forks, fine-tune, adapters, quantized/conversion и merge показаны отдельно.
+
+Готовый конфиг без ограничения числа результатов и размера модели:
+
+```bash
+go run . catalog --config catalog.2025-llm-market.json
+```
+
+Для base-моделей уравнение `6 × N × T` из `formula.txt` применяется только при
+подтверждении независимого pretraining и известных параметрах. Reported token
+budget имеет приоритет, иначе используется fallback 20 токенов/параметр. Для
+MoE учитываются опубликованные active parameters. Остаточный класс `base` сам по
+себе подтверждением не считается. Fork, quantized/conversion и merge не получают
+стоимость; fine-tune/adapter учитываются только при reported compute/cost.
+Dense fallback после подстановки констант:
+
+```text
+training_cost_USD = 155.881361644759 × parameters_billions²
+```
+
+Merge, quantization и форматы-конверсии исключаются из стоимости. Копии
+карточек, старые зеркала и повторные публикации одного training run
+дедуплицируются. Исходный
+evidence, hashes и даты сохраняются для аудита.
+
+Боевой конфиг не загружает README по одному. Он один раз скачивает пять
+Parquet-шардов `librarian-bots/model_cards_with_metadata` с полными текстами
+model cards (около 1.28 ГБ суммарно на момент написания), сохраняет их в
+`results-2025-production/cache/` и затем ищет compute локально. Незавершённая
+загрузка продолжается из файла `.part`. Полный проход
+каталога также сохраняется как gzip-checkpoint, поэтому повторный запуск не
+сканирует 1.8 млн записей заново. Профили владельцев в production-конфиге не
+обогащаются отдельными API-запросами: имена и суммы владельцев сохраняются, а тип
+остаётся `unknown`, что предотвращает ещё один многодневный rate-limited этап.
+
+Главные результаты находятся в `results-2025-llm-market/models.csv`,
+`owners.csv`, `summary.json` и готовом `report.md`. Поля `training_cost_usd`
+содержат сумму в долларах, а `training_cost_method` отмечает расчёт scratch по
+`formula.txt`.
+
+`summary.json` отдельно показывает pretraining-кандидатов, категории рынка,
+размерные диапазоны base, subtotals по методам и sensitivity-сценарии: $20.57M
+при строгих 20 tokens/parameter с active MoE и $271.57M при буквальном total².
+Результат является formula-equivalent оценкой H100 compute, а не бухгалтерской
+суммой: Hub не требует публиковать фактическое железо, длительность или счета.
