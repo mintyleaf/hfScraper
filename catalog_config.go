@@ -100,6 +100,8 @@ type computeEstimate struct {
 	Fraction  float64 `json:"training_fraction"`
 	Method    string  `json:"method,omitempty"`
 	Source    string  `json:"source,omitempty"`
+
+	AssumedBudget bool `json:"assumed_budget,omitempty"`
 }
 
 type catalogSafetensors struct {
