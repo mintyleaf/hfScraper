@@ -85,8 +85,8 @@ type computeProfile struct {
 	Machines             int     `json:"machines"`
 	GPUsPerMachine       int     `json:"gpus_per_machine"`
 	FinetuneCostFraction float64 `json:"finetune_compute_fraction"`
-DiffusionImageBudget float64 `json:"diffusion_image_budget,omitempty"`
-LatentSequenceLength float64 `json:"latent_sequence_length,omitempty"`
+	DiffusionImageBudget float64 `json:"diffusion_image_budget,omitempty"`
+	LatentSequenceLength float64 `json:"latent_sequence_length,omitempty"`
 }
 
 type computeEstimate struct {
