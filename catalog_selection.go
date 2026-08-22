@@ -33,7 +33,7 @@ func compileSelections(config catalogConfig, now time.Time) ([]compiledSelection
 		if profile.Name == "" || profiles[profile.Name] {
 			return nil, time.Time{}, errors.New("compute profile names must be non-empty and unique")
 		}
-		if profile.GPUTFLOPS <= 0 || profile.Efficiency <= 0 || profile.Efficiency > 1 || profile.GPUHourCostUSD < 0 || profile.TokensPerParameter <= 0 || profile.Machines <= 0 || profile.GPUsPerMachine <= 0 || profile.FinetuneCostFraction < 0 || profile.FinetuneCostFraction > 1 {
+		if profile.GPUTFLOPS <= 0 || profile.Efficiency <= 0 || profile.Efficiency > 1 || profile.GPUHourCostUSD < 0 || profile.TokensPerParameter <= 0 || profile.Machines <= 0 || profile.GPUsPerMachine <= 0 || profile.FinetuneCostFraction < 0 || profile.FinetuneCostFraction > 1 || profile.DiffusionImageBudget < 0 || profile.LatentSequenceLength < 0 {
 			return nil, time.Time{}, fmt.Errorf("compute profile %q has invalid settings", profile.Name)
 		}
 		profiles[profile.Name] = true
