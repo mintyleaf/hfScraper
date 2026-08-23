@@ -100,7 +100,6 @@ type computeEstimate struct {
 	Fraction  float64 `json:"training_fraction"`
 	Method    string  `json:"method,omitempty"`
 	Source    string  `json:"source,omitempty"`
-
 	AssumedBudget bool `json:"assumed_budget,omitempty"`
 }
 
@@ -218,7 +217,7 @@ var (
 		"keatone/air-base-lacuna":                                             "fork",
 		"gradients-io-tournaments/Covenant-Base":                              "fork",
 		"supermanaff/Affine-5FC1Dq1kdHAGmrEkSCLwEKeNM7i9YY6rXtZKaLM2q4qaAE6b": "fork",
-		"nev8r/SmolLM3-3B-Custom-Base":                                        "fork",
+		"nev8r/SmolLM3-3B-Custom-Base":                                        "finetune",
 		"mokshahf/CosmuQuantaa":                                               "finetune",
 		"ByteDance-Seed/Seed-OSS-36B-Base-woSyn":                              "fork",
 		"common-pile/comma-v0.1-1t":                                           "fork",
@@ -311,10 +310,11 @@ func parseFlexibleTime(value string, endOfDay bool) (time.Time, error) {
 	if value == "" {
 		return time.Time{}, nil
 	}
-	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err == nil {
 		return parsed.UTC(), nil
 	}
-	parsed, err := time.Parse("2006-01-02", value)
+	parsed, err = time.Parse("2006-01-02", value)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("invalid date %q: use YYYY-MM-DD or RFC3339", value)
 	}
