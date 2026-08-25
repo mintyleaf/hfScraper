@@ -1,0 +1,54 @@
+{
+  "generated_at": "2026-08-24T17:07:23.198502366Z",
+  "complete": true,
+  "models_scanned": 1110000,
+  "retained_weight_repositories": 901931,
+  "reported_compute_candidates": 335787,
+  "reported_compute_resolved": 741,
+  "scratch_claim_candidates": 103172,
+  "scratch_claims_resolved": 4052,
+  "selections": {
+    "public_text_llm_2025_no_llm": {
+      "description": "Frozen baseline from the completed 2025 text no-LLM run",
+      "market_scope": "text_llm",
+      "models": 447436,
+      "known_training_costs": 1037,
+      "total_training_cost_usd": 46570667.232897185,
+      "lower_costed_models": 1037,
+      "lower_training_cost_usd": 46570667.232897185,
+      "upper_costed_models": 1037,
+      "upper_training_cost_usd": 46570667.232897185,
+      "costed_models_by_kind": {
+        "adapter": 215,
+        "base": 489,
+        "finetune": 333
+      },
+      "training_cost_by_kind_usd": {
+        "adapter": 4663.410553711112,
+        "base": 44732116.08127417,
+        "finetune": 1833887.7410692943
+      }
+    },
+    "public_diffusion_2025_no_llm": {
+      "description": "Frozen baseline from the completed 2025 diffusion no-LLM run",
+      "market_scope": "diffusion",
+      "models": 49914,
+      "known_training_costs": 42,
+      "total_training_cost_usd": 8649318.311758405,
+      "lower_costed_models": 42,
+      "lower_training_cost_usd": 8649318.311758405,
+      "upper_costed_models": 42,
+      "upper_training_cost_usd": 8649318.311758405,
+      "costed_models_by_kind": {
+        "adapter": 21,
+        "base": 9,
+        "finetune": 12
+      },
+      "training_cost_by_kind_usd": {
+        "adapter": 21084.691527777773,
+        "base": 8612802.770230629,
+        "finetune": 15430.850000000002
+      }
+    }
+  }
+}

@@ -6,26 +6,26 @@
 ## Запуск
 
 ```bash
-go run . catalog --config catalog.example.json
+go run ./cmd/hfscraper catalog --config configs/catalog.example.json
 ```
 
 Расширенный набор сценариев запускается так:
 
 ```bash
-go run . catalog --config catalog.scenarios.json
+go run ./cmd/hfscraper catalog --config configs/catalog.scenarios.json
 ```
 
 Другой каталог результатов задаётся без редактирования JSON:
 
 ```bash
-go run . catalog --config my-config.json --output my-results
+go run ./cmd/hfscraper catalog --config configs/my-config.json --output my-results
 ```
 
 Для gated public repositories можно передать read-only токен через `HF_TOKEN`.
 
 ## Готовые выборки
 
-В `catalog.example.json` уже настроены:
+В `configs/catalog.example.json` уже настроены:
 
 - 100 самых скачиваемых новых LLM за 365 дней;
 - 100 самых скачиваемых base LLM;

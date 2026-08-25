@@ -7,18 +7,7 @@ import (
 
 // isDiffusionModel checks if a model is a diffusion model based on pipeline tag
 func isDiffusionModel(model catalogModel) bool {
-	pipeline := strings.ToLower(model.PipelineTag)
-	switch pipeline {
-	case "text-to-image", "image-to-image", "text-to-video":
-		return true
-	default:
-		// Fallback: check for diffusion-related tags in non-text models 
-		joined := strings.ToLower(model.ID + " " + strings.Join(model.Tags, " "))
-		if nonTextModelTagRE.MatchString(joined) {
-			return true
-		}
-		return false
-	}
+	return catalogIsTargetDiffusion(model)
 }
 
 // hasDiffusionProfile checks if a compute profile is enabled for diffusion models.
@@ -28,12 +17,16 @@ func hasDiffusionProfile(profile computeProfile) bool {
 }
 
 func modelToRecord(endpoint string, model catalogModel, selection selectionConfig, params int64, parameterError string, profiles map[string]computeProfile, reported *reportedTrainingCompute, scratch *reportedScratchClaim) catalogRecord {
+	return modelToRecordWithReview(endpoint, model, selection, params, parameterError, profiles, reported, scratch, nil, scratch != nil)
+}
+
+func modelToRecordWithReview(endpoint string, model catalogModel, selection selectionConfig, params int64, parameterError string, profiles map[string]computeProfile, reported *reportedTrainingCompute, scratch *reportedScratchClaim, review *localLLMReview, deterministicScratch bool) catalogRecord {
 	var billions *float64
 	if params > 0 {
 		value := float64(params) / 1e9
 		billions = &value
 	}
-	kind := resolvedCatalogModelKind(model, scratch, reported)
+	kind := resolvedCatalogModelKindWithReview(model, scratch, reported, review)
 	record := catalogRecord{
 		Selection: selection.Name, Description: selection.Description,
 		RepoID: model.ID, RepoURL: strings.TrimRight(endpoint, "/") + "/" + model.ID,
@@ -42,7 +35,7 @@ func modelToRecord(endpoint string, model catalogModel, selection selectionConfi
 		ModelKind: kind, BaseModel: firstBaseModel(model),
 		OwnParameters: model.Safetensors.Total, EffectiveParameters: params, ParametersB: billions,
 		Downloads: model.Downloads, Likes: model.Likes, Tags: model.Tags,
-		ScratchClaim: scratch,
+		ScratchClaim: scratch, LocalLLMReview: review,
 	}
 	if parameterError != "" {
 		record.Errors = append(record.Errors, parameterError)
@@ -54,7 +47,10 @@ func modelToRecord(endpoint string, model catalogModel, selection selectionConfi
 		}
 		cost := reported.CostUSD
 		record.TrainingCostUSD = &cost
+		record.LowerTrainingCostUSD = floatPointer(cost)
+		record.UpperTrainingCostUSD = floatPointer(cost)
 		record.TrainingCostMethod = reported.CostMethod
+		record.TrainingCostTier = "reported"
 		record.Compute = append(record.Compute, computeEstimate{
 			Profile: "reported_training_time", GPUName: reported.GPUName,
 			TotalGPUs: reported.GPUCount, GPUHours: reported.GPUHours,
@@ -63,76 +59,74 @@ func modelToRecord(endpoint string, model catalogModel, selection selectionConfi
 		})
 		return record
 	}
-	
+
 	// Check if this is a diffusion model
 	isDiffusion := isDiffusionModel(model)
-	
-	formulaRequiresScratch := selection.RequireExplicitScratchForBase || selection.FormulaRequiresExplicitScratch
-	
-	// For diffusion models, use estimateDiffusionBaseTrainingCompute even without scratch-claim
-	if isDiffusion {
-		// Check if we should proceed with compute estimation for this model
-		if formulaRequiresScratch && scratch == nil {
-			return record
-		}
-	} else {
-		// Non-diffusion models follow original logic
-		if formulaRequiresScratch && scratch == nil {
-			return record
-		}
-	}
 
-	if scratch != nil && scratch.EvidenceType == "declared_base_model" && model.Likes < selection.DeclaredBaseMinLikes && model.Downloads < selection.DeclaredBaseMinDownloads {
-		record.Errors = append(record.Errors, "declared base checkpoint lacks independent pretraining evidence and minimum market engagement")
+	formulaRequiresScratch := selection.RequireExplicitScratchForBase || selection.FormulaRequiresExplicitScratch
+
+	if formulaRequiresScratch && scratch == nil {
 		return record
 	}
-	
+
+	if review == nil && scratch != nil && scratch.EvidenceType == "declared_base_model" {
+		record.Errors = append(record.Errors, "repository name says base but model card does not prove independent pretraining")
+		return record
+	}
+
 	for _, profileName := range selection.ComputeProfiles {
 		if profile, ok := profiles[profileName]; ok && params > 0 {
 			literal := estimateCompute(params, kind, profile)
 			literal.Method = "formula_txt_literal_total_parameters"
 			literal.Source = "formula.txt"
-			
+
 			// For diffusion models with valid diffusion profiles, use special compute estimation
 			var estimate computeEstimate
 			if isDiffusion && hasDiffusionProfile(profile) {
 				estimate = estimateDiffusionBaseTrainingCompute(params, scratch, profile)
-				// Use the diffusion prefix for method name to enable automatic deduplication
-				estimate.Method = "formula_txt_diffusion_" + strings.TrimPrefix(estimate.Method, "formula_txt_")
 			} else if formulaRequiresScratch && scratch != nil {
 				estimate = estimateBaseTrainingCompute(params, scratch, profile)
 			} else {
 				estimate = literal
 			}
-			
+
 			if math.IsNaN(estimate.GPUHours) || math.IsInf(estimate.GPUHours, 0) || math.IsNaN(estimate.WallDays) || math.IsInf(estimate.WallDays, 0) || math.IsNaN(estimate.CostUSD) || math.IsInf(estimate.CostUSD, 0) {
 				record.Errors = append(record.Errors, "compute estimate overflow for profile "+profileName)
 				continue
 			}
-			
+
 			if estimate.Method != literal.Method || math.Abs(estimate.CostUSD-literal.CostUSD) > 0.005 {
 				record.Compute = append(record.Compute, literal)
 			}
 			record.Compute = append(record.Compute, estimate)
-			
-			// Priority for reported compute is maintained for non-diffusion models
-			if record.TrainingCostUSD == nil && !isDiffusion {
+
+			if record.TrainingCostUSD == nil && record.UpperTrainingCostUSD == nil {
 				cost := estimate.CostUSD
-				record.TrainingCostUSD = &cost
-				record.TrainingCostMethod = estimate.Method
-				if record.TrainingCostMethod == "" {
-					record.TrainingCostMethod = "parameter_scaling_estimate"
+				record.UpperTrainingCostUSD = floatPointer(cost)
+				if scratch != nil && scratch.EvidenceType == "local_llm_medium" && !deterministicScratch {
+					record.TrainingCostTier = "llm_medium_upper_only"
+					record.TrainingCostMethod = estimate.Method
+				} else {
+					record.TrainingCostUSD = floatPointer(cost)
+					record.TrainingCostMethod = estimate.Method
+					if record.TrainingCostMethod == "" {
+						record.TrainingCostMethod = "parameter_scaling_estimate"
+					}
+					if scratch != nil && scratch.EvidenceType == "local_llm_high" && !deterministicScratch {
+						record.TrainingCostTier = "llm_high"
+					} else {
+						record.TrainingCostTier = "deterministic"
+						record.LowerTrainingCostUSD = floatPointer(cost)
+					}
 				}
-			}
-			
-			// For diffusion models, we also set the training cost if it's not already set by reported compute
-			if record.TrainingCostUSD == nil && isDiffusion {
-				cost := estimate.CostUSD
-				record.TrainingCostUSD = &cost
-				record.TrainingCostMethod = estimate.Method
 			}
 		}
 	}
-	
+
 	return record
+}
+
+func floatPointer(value float64) *float64 {
+	copy := value
+	return &copy
 }

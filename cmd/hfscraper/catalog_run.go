@@ -27,10 +27,11 @@ func boolValue(value *bool, fallback bool) bool {
 	return *value
 }
 
-func runCatalogCLI(arguments []string) error {
+func runCatalogCLI(ctx context.Context, arguments []string) error {
 	flags := flag.NewFlagSet("catalog", flag.ContinueOnError)
-	configPath := flags.String("config", "catalog.example.json", "path to JSON catalog configuration")
+	configPath := flags.String("config", "configs/catalog.example.json", "path to JSON catalog configuration")
 	outputOverride := flags.String("output", "", "override output_dir from config")
+	preLLMOnly := flags.Bool("pre-llm-only", false, "stop after API-only preliminary base-candidate files")
 	if err := flags.Parse(arguments); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -56,8 +57,11 @@ func runCatalogCLI(arguments []string) error {
 	if *outputOverride != "" {
 		config.OutputDir = *outputOverride
 	}
+	if *preLLMOnly {
+		config.Scan.StopAfterPreLLM = true
+	}
 	applyCatalogDefaults(&config)
-	return runCatalog(context.Background(), config)
+	return runCatalog(ctx, config)
 }
 
 func fetchBaseParameters(ctx context.Context, client *httpClient, endpoint string, ids []string, workers int, logger *catalogLogger) (map[string]int64, map[string]string) {
@@ -238,6 +242,24 @@ func runCatalog(ctx context.Context, config catalogConfig) (resultErr error) {
 	if config.Owners.Workers < 1 || config.Owners.Workers > 64 {
 		return fmt.Errorf("owners.workers must be between 1 and 64, got %d", config.Owners.Workers)
 	}
+	if config.LocalLLM.Enabled {
+		if config.LocalLLM.Scope != "text_llm" && config.LocalLLM.Scope != "diffusion" {
+			return fmt.Errorf("local_llm.scope must be text_llm or diffusion, got %q", config.LocalLLM.Scope)
+		}
+		llmURL, parseErr := url.Parse(config.LocalLLM.BaseURL)
+		if parseErr != nil || llmURL.Host == "" || (llmURL.Scheme != "http" && llmURL.Scheme != "https") {
+			return fmt.Errorf("local_llm.base_url must be an absolute http(s) URL, got %q", config.LocalLLM.BaseURL)
+		}
+		if strings.TrimSpace(config.LocalLLM.Model) == "" {
+			return errors.New("local_llm.model is required when local_llm.enabled is true")
+		}
+		if config.LocalLLM.Workers < 1 || config.LocalLLM.Workers > 64 {
+			return fmt.Errorf("local_llm.workers must be between 1 and 64, got %d", config.LocalLLM.Workers)
+		}
+		if config.LocalLLM.TimeoutSeconds <= 0 || config.LocalLLM.MaxInputChars < 1000 {
+			return errors.New("local_llm.timeout_seconds must be positive and max_input_chars must be at least 1000")
+		}
+	}
 	if config.Scan.Retries == nil || *config.Scan.Retries < 0 || *config.Scan.Retries > 20 {
 		return errors.New("scan.retries must be between 0 and 20")
 	}
@@ -267,7 +289,7 @@ func runCatalog(ctx context.Context, config catalogConfig) (resultErr error) {
 			return fmt.Errorf("selection %q requires explicit scratch claims but scan.resolve_scratch_claims is false", selection.config.Name)
 		}
 	}
-	if (boolValue(config.Scan.ResolveReportedCompute, false) || boolValue(config.Scan.ResolveScratchClaims, false)) && !boolValue(config.Scan.FetchIndividualReadmes, true) {
+	if (boolValue(config.Scan.ResolveReportedCompute, false) || boolValue(config.Scan.ResolveScratchClaims, false) || config.LocalLLM.Enabled) && !boolValue(config.Scan.FetchIndividualReadmes, true) {
 		if (config.Scan.BulkModelCardsURL == "" && len(config.Scan.BulkModelCardsURLs) == 0) || config.Scan.BulkModelCardsFile == "" {
 			return errors.New("a bulk model-card URL and scan.bulk_model_cards_file are required when individual README fetching is disabled")
 		}
@@ -400,11 +422,20 @@ func runCatalog(ctx context.Context, config catalogConfig) (resultErr error) {
 	}
 	sort.Strings(baseIDs)
 	baseParams, baseErrors := fetchBaseParameters(ctx, client, config.Endpoint, baseIDs, config.Owners.Workers, logger)
+	if err := writePreLLMBaseCandidates(config.OutputDir, models, selections, baseParams, baseErrors, logger); err != nil {
+		return fmt.Errorf("write preliminary API-only candidate snapshot: %w", err)
+	}
+	if config.Scan.StopAfterPreLLM {
+		logger.info("pre_llm_only_completed", "stopped after preliminary API-only candidate snapshot as requested", map[string]any{"output_dir": config.OutputDir})
+		fmt.Printf("Pre-LLM-only complete. Review %s/pre-llm-summary.json before starting model-card/LLM processing.\n", config.OutputDir)
+		return nil
+	}
 
 	signalCandidates := make([]catalogModel, 0)
 	signalCandidateIDs := make(map[string]bool)
 	reportedCandidateIDs := make(map[string]bool)
 	scratchCandidateIDs := make(map[string]bool)
+	localLLMCandidateIDs := make(map[string]bool)
 	if boolValue(config.Scan.ResolveReportedCompute, false) || boolValue(config.Scan.ResolveScratchClaims, false) {
 		for _, model := range models {
 			kind := catalogModelKind(model)
@@ -423,6 +454,9 @@ func runCatalog(ctx context.Context, config catalogConfig) (resultErr error) {
 				}
 				if needsScratch {
 					scratchCandidateIDs[model.ID] = true
+				}
+				if config.LocalLLM.Enabled && kind == "base" && params > 0 {
+					localLLMCandidateIDs[model.ID] = true
 				}
 				if needsCompute || needsScratch {
 					signalCandidateIDs[model.ID] = true
@@ -453,6 +487,13 @@ func runCatalog(ctx context.Context, config catalogConfig) (resultErr error) {
 	}
 	logger.info("reported_compute_resolved", "reported training compute scan completed", map[string]any{"candidates": len(reportedCandidateIDs), "resolved": len(reportedCompute)})
 	logger.info("scratch_claims_resolved", "explicit scratch claim scan completed", map[string]any{"candidates": len(scratchCandidateIDs), "resolved": scratchResolved})
+	localLLMReviews := make(map[string]*localLLMReview)
+	if config.LocalLLM.Enabled {
+		localLLMReviews, _, err = resolveLocalLLMReviewsFromParquet(ctx, client, config.LocalLLM, config.OutputDir, bulkURLs, bulkFile, models, localLLMCandidateIDs, logger)
+		if err != nil {
+			return fmt.Errorf("resolve local LLM reviews: %w", err)
+		}
+	}
 
 	var records []catalogRecord
 	computeProfiles := make(map[string]computeProfile, len(config.Compute))
@@ -464,13 +505,29 @@ func runCatalog(ctx context.Context, config catalogConfig) (resultErr error) {
 		for _, model := range models {
 			params, parameterError := effectiveParameters(model, baseParams, baseErrors)
 			if matchesSelection(model, selection, params) {
+				if config.LocalLLM.Enabled && config.LocalLLM.Scope == "text_llm" && selection.config.TargetDiffusionOnly {
+					continue
+				}
+				if config.LocalLLM.Enabled && config.LocalLLM.Scope == "diffusion" && selection.config.TargetLLMOnly {
+					continue
+				}
+				// The 2025 text-market pass must never price diffusion/image/video
+				// repositories, even if incomplete Hub metadata lets one through the
+				// broader text-LLM heuristic.
+				if selection.config.TargetLLMOnly && isDiffusionModel(model) {
+					continue
+				}
 				reported := reportedCompute[model.ID]
-				scratch := scratchClaims[model.ID]
+				review := localLLMReviews[model.ID]
+				scratch, deterministicScratch := resolveScratchClaimForReview(config.LocalLLM.Enabled, scratchClaims[model.ID], review)
 				scratchUsable := scratch != nil && scratchClaimMatchesOwner(model, scratch) && scratchClaimFallsInSelection(scratch, selection)
 				if !scratchUsable {
 					scratch = nil
 				}
-				kind := resolvedCatalogModelKind(model, scratch, reported)
+				kind := resolvedCatalogModelKindWithReview(model, scratch, reported, review)
+				if kind == "non_text" {
+					continue
+				}
 				if selection.config.RequireReportedCompute && reported == nil {
 					continue
 				}
@@ -483,7 +540,7 @@ func runCatalog(ctx context.Context, config catalogConfig) (resultErr error) {
 				if selection.config.RequireExplicitScratchForBase && kind == "base" && scratch == nil {
 					continue
 				}
-				selected = append(selected, modelToRecord(config.Endpoint, model, selection.config, params, parameterError, computeProfiles, reported, scratch))
+				selected = append(selected, modelToRecordWithReview(config.Endpoint, model, selection.config, params, parameterError, computeProfiles, reported, scratch, review, deterministicScratch))
 			}
 		}
 		sort.SliceStable(selected, func(i, j int) bool {
@@ -500,9 +557,13 @@ func runCatalog(ctx context.Context, config catalogConfig) (resultErr error) {
 	deduplicateReportedDerivativeAgainstBase(records)
 	deduplicateReportedTrainingRuns(records)
 	deduplicateScratchTrainingRuns(records)
+	deduplicateLocalLLMTrainingRuns(records)
 
 	ownerNamesSet := make(map[string]bool)
 	for _, record := range records {
+		if config.Owners.CostedOnly && record.TrainingCostUSD == nil {
+			continue
+		}
 		if record.Owner != "" {
 			ownerNamesSet[record.Owner] = true
 		}
@@ -610,7 +671,7 @@ func runCatalog(ctx context.Context, config catalogConfig) (resultErr error) {
 		return fmt.Errorf("write output path to stdout: %w", err)
 	}
 	for name, selection := range summary.Selections {
-		if _, err := fmt.Printf("Training cost [%s]: $%.2f (%d models with cost)\n", name, selection.TotalTrainingCostUSD, selection.KnownTrainingCosts); err != nil {
+		if _, err := fmt.Printf("Training cost [%s]: lower=$%.2f (%d runs), central=$%.2f (%d runs), upper=$%.2f (%d runs)\n", name, selection.LowerTrainingCostUSD, selection.LowerCostedModels, selection.TotalTrainingCostUSD, selection.KnownTrainingCosts, selection.UpperTrainingCostUSD, selection.UpperCostedModels); err != nil {
 			return fmt.Errorf("write total cost to stdout: %w", err)
 		}
 	}
@@ -632,11 +693,16 @@ func writeMarketReport(directory string, summary catalogSummary, owners map[stri
 		if item.Description != "" {
 			report.WriteString(item.Description + "\n\n")
 		}
-		fmt.Fprintf(&report, "- Итоговая стоимость: **$%.2f**\n", item.TotalTrainingCostUSD)
-		fmt.Fprintf(&report, "- Сценарий строго 20 токенов/параметр, MoE по active × total: **$%.2f**\n", item.Formula20HybridUSD)
-		fmt.Fprintf(&report, "- Буквальный upper-сценарий 20 токенов/параметр и total² для MoE: **$%.2f**\n", item.Formula20LiteralUSD)
+		fmt.Fprintf(&report, "- Консервативный lower bound: **$%.2f** (%d run)\n", item.LowerTrainingCostUSD, item.LowerCostedModels)
+		fmt.Fprintf(&report, "- Основной central estimate: **$%.2f** (%d run)\n", item.TotalTrainingCostUSD, item.KnownTrainingCosts)
+		fmt.Fprintf(&report, "- Расширенный upper estimate: **$%.2f** (%d run)\n", item.UpperTrainingCostUSD, item.UpperCostedModels)
+		if item.MarketScope != "diffusion" {
+			fmt.Fprintf(&report, "- Сценарий строго 20 токенов/параметр, MoE по active × total: **$%.2f**\n", item.Formula20HybridUSD)
+			fmt.Fprintf(&report, "- Буквальный upper-сценарий 20 токенов/параметр и total² для MoE: **$%.2f**\n", item.Formula20LiteralUSD)
+		}
 		fmt.Fprintf(&report, "- Репозиториев в целевой выборке: %d\n", item.Models)
 		fmt.Fprintf(&report, "- Самостоятельных training run с рассчитанной стоимостью: %d\n", item.KnownTrainingCosts)
+		fmt.Fprintf(&report, "- Local-LLM review: %d; high=%d, medium=%d, low/unknown=%d\n", item.LocalLLMReviewed, item.LocalLLMHigh, item.LocalLLMMedium, item.LocalLLMLow)
 		fmt.Fprintf(&report, "- Уникальных владельцев: %d\n", item.UniqueOwners)
 		fmt.Fprintf(&report, "- Скачиваний: %d; likes: %d\n\n", item.TotalDownloads, item.TotalLikes)
 		report.WriteString("| Категория | Репозиториев | Run с cost | Стоимость, USD |\n|---|---:|---:|---:|\n")
@@ -655,7 +721,7 @@ func writeMarketReport(directory string, summary catalogSummary, owners map[stri
 		report.WriteString("\n")
 	}
 	fmt.Fprintf(&report, "Scratch-кандидатов: %d; явное обучение с нуля подтверждено: %d; без подтверждения: %d. Fine-tune/adapter-кандидатов на compute: %d; найден compute/cost: %d; без данных: %d. Репозиториев с весами после первичного фильтра: %d.\n\n", summary.ScratchClaimCandidates, summary.ScratchClaimsResolved, summary.ScratchClaimsIgnored, summary.ReportedComputeCandidates, summary.ReportedComputeResolved, summary.ReportedComputeIgnored, summary.RetainedWeightRepositories)
-	report.WriteString("Для base-модели используется FLOPs = 6 × N × T из `formula.txt`. Если карточка сообщает фактический объём pretraining-токенов, берётся он; иначе T = 20 × N. Для dense это сводится к cost = 155.881361644759 × P² USD. Для MoE при наличии публичного active count FLOPs/token считаются по active-параметрам, а token fallback — по total. Fork, quantization, conversion и merge не получают стоимость; fine-tune/adapters входят только при опубликованном compute/cost.\n\n")
+	report.WriteString("Для text base используется FLOPs = 6 × N × T: reported pretraining tokens имеют приоритет, иначе T = 20 × N. Для diffusion base используется отдельный profile fallback: FLOPs = 6 × N_effective × (N_total × diffusion_image_budget × latent_sequence_length). Коэффициенты diffusion находятся в конфиге и не смешиваются с text-суммой. Fork, quantization, conversion и merge не получают стоимость; fine-tune/adapters входят только при опубликованном compute/cost.\n\n")
 	report.WriteString("Ограничения интерпретации:\n\n")
 	report.WriteString("- Первичный отбор 2025 сделан по `createdAt` репозитория.\n")
 	report.WriteString("- Если в training section явно указан другой год и не указан 2025, такой run исключён; без даты используется год `createdAt` как допущение.\n")
@@ -715,7 +781,7 @@ func writeCatalogModels(directory string, records []catalogRecord) error {
 		return fmt.Errorf("create %q: %w", path, err)
 	}
 	w := csv.NewWriter(file)
-	if err := w.Write([]string{"selection", "repo_id", "repo_url", "owner", "owner_type", "created_at", "last_modified", "pipeline_tag", "library_name", "model_kind", "base_model", "own_parameters", "effective_parameters", "parameters_b", "downloads", "likes", "training_cost_usd", "training_cost_method", "reported_compute_json", "scratch_claim_json", "tags", "compute_estimates_json", "errors"}); err != nil {
+	if err := w.Write([]string{"selection", "repo_id", "repo_url", "owner", "owner_type", "created_at", "last_modified", "pipeline_tag", "library_name", "model_kind", "base_model", "own_parameters", "effective_parameters", "parameters_b", "downloads", "likes", "lower_training_cost_usd", "training_cost_usd", "upper_training_cost_usd", "training_cost_method", "training_cost_tier", "reported_compute_json", "scratch_claim_json", "local_llm_review_json", "tags", "compute_estimates_json", "errors"}); err != nil {
 		return closeFileAfterError(file, path, fmt.Errorf("write header to %q: %w", path, err))
 	}
 	for _, r := range records {
@@ -743,11 +809,26 @@ func writeCatalogModels(directory string, records []catalogRecord) error {
 			}
 			scratchJSON = string(encoded)
 		}
+		llmReviewJSON := ""
+		if r.LocalLLMReview != nil {
+			encoded, err := json.Marshal(r.LocalLLMReview)
+			if err != nil {
+				return closeFileAfterError(file, path, fmt.Errorf("encode local LLM review for %q: %w", r.RepoID, err))
+			}
+			llmReviewJSON = string(encoded)
+		}
 		cost := ""
 		if r.TrainingCostUSD != nil {
 			cost = strconv.FormatFloat(*r.TrainingCostUSD, 'f', 2, 64)
 		}
-		if err := w.Write([]string{r.Selection, r.RepoID, r.RepoURL, r.Owner, r.OwnerType, r.CreatedAt, r.LastModified, r.PipelineTag, r.LibraryName, r.ModelKind, r.BaseModel, strconv.FormatInt(r.OwnParameters, 10), strconv.FormatInt(r.EffectiveParameters, 10), p, strconv.FormatInt(r.Downloads, 10), strconv.FormatInt(r.Likes, 10), cost, r.TrainingCostMethod, reportedJSON, scratchJSON, strings.Join(r.Tags, "|"), string(computeJSON), strings.Join(r.Errors, " | ")}); err != nil {
+		lowerCost, upperCost := "", ""
+		if r.LowerTrainingCostUSD != nil {
+			lowerCost = strconv.FormatFloat(*r.LowerTrainingCostUSD, 'f', 2, 64)
+		}
+		if r.UpperTrainingCostUSD != nil {
+			upperCost = strconv.FormatFloat(*r.UpperTrainingCostUSD, 'f', 2, 64)
+		}
+		if err := w.Write([]string{r.Selection, r.RepoID, r.RepoURL, r.Owner, r.OwnerType, r.CreatedAt, r.LastModified, r.PipelineTag, r.LibraryName, r.ModelKind, r.BaseModel, strconv.FormatInt(r.OwnParameters, 10), strconv.FormatInt(r.EffectiveParameters, 10), p, strconv.FormatInt(r.Downloads, 10), strconv.FormatInt(r.Likes, 10), lowerCost, cost, upperCost, r.TrainingCostMethod, r.TrainingCostTier, reportedJSON, scratchJSON, llmReviewJSON, strings.Join(r.Tags, "|"), string(computeJSON), strings.Join(r.Errors, " | ")}); err != nil {
 			return closeFileAfterError(file, path, fmt.Errorf("write model %q to %q: %w", r.RepoID, path, err))
 		}
 	}
@@ -818,8 +899,15 @@ func buildCatalogSummary(now time.Time, complete bool, pages, scanned, retained,
 		Selections: make(map[string]selectionSummary),
 	}
 	for _, selection := range selections {
+		marketScope := "all"
+		if selection.TargetLLMOnly {
+			marketScope = "text_llm"
+		} else if selection.TargetDiffusionOnly {
+			marketScope = "diffusion"
+		}
 		result.Selections[selection.Name] = selectionSummary{
 			Description:          selection.Description,
+			MarketScope:          marketScope,
 			OwnerTypes:           make(map[string]int),
 			ModelKinds:           make(map[string]int),
 			CostedModelsByKind:   make(map[string]int),
@@ -838,6 +926,25 @@ func buildCatalogSummary(now time.Time, complete bool, pages, scanned, retained,
 		s.Models++
 		s.TotalDownloads += record.Downloads
 		s.TotalLikes += record.Likes
+		if record.LowerTrainingCostUSD != nil {
+			s.LowerCostedModels++
+			s.LowerTrainingCostUSD += *record.LowerTrainingCostUSD
+		}
+		if record.UpperTrainingCostUSD != nil {
+			s.UpperCostedModels++
+			s.UpperTrainingCostUSD += *record.UpperTrainingCostUSD
+		}
+		if record.LocalLLMReview != nil {
+			s.LocalLLMReviewed++
+			switch record.LocalLLMReview.Confidence {
+			case "high":
+				s.LocalLLMHigh++
+			case "medium":
+				s.LocalLLMMedium++
+			default:
+				s.LocalLLMLow++
+			}
+		}
 		if record.TrainingCostUSD != nil {
 			s.KnownTrainingCosts++
 			s.TotalTrainingCostUSD += *record.TrainingCostUSD
@@ -845,7 +952,10 @@ func buildCatalogSummary(now time.Time, complete bool, pages, scanned, retained,
 			s.TrainingCostByKind[record.ModelKind] += *record.TrainingCostUSD
 			s.CostedModelsByMethod[record.TrainingCostMethod]++
 			s.TrainingCostByMethod[record.TrainingCostMethod] += *record.TrainingCostUSD
-			if record.ModelKind != "base" {
+			if s.MarketScope == "diffusion" {
+				// The text-only 20-tokens-per-parameter sensitivity fields are not
+				// meaningful for the separate diffusion formula.
+			} else if record.ModelKind != "base" {
 				s.Formula20HybridUSD += *record.TrainingCostUSD
 				s.Formula20LiteralUSD += *record.TrainingCostUSD
 			} else {

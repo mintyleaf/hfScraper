@@ -158,7 +158,7 @@ trained from the ground up
 
 ## 5. Расчёт стоимости полного обучения
 
-Исходные параметры из `formula.txt`:
+Исходные параметры из `docs/formula.txt`:
 
 - GPU: **NVIDIA H100**;
 - производительность: **989 TFLOPS**;

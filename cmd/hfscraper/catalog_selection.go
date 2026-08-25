@@ -42,6 +42,9 @@ func compileSelections(config catalogConfig, now time.Time) ([]compiledSelection
 		if selection.Name == "" {
 			return nil, time.Time{}, errors.New("every selection needs a name")
 		}
+		if selection.TargetLLMOnly && selection.TargetDiffusionOnly {
+			return nil, time.Time{}, fmt.Errorf("selection %q cannot enable both target_llm_only and target_diffusion_only", selection.Name)
+		}
 		if _, exists := names[selection.Name]; exists {
 			return nil, time.Time{}, fmt.Errorf("duplicate selection name %q", selection.Name)
 		}
@@ -158,6 +161,9 @@ func matchesSelection(model catalogModel, selection compiledSelection, effective
 		return false
 	}
 	if config.TargetLLMOnly && !catalogIsTargetLLM(model) {
+		return false
+	}
+	if config.TargetDiffusionOnly && !catalogIsTargetDiffusion(model) {
 		return false
 	}
 	tags := lowerSet(model.Tags)

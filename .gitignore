@@ -1,4 +1,11 @@
-results/
+results/*
+!results/one-page/
+!results/one-page/**
 catalog-results/
 hf-scraper
 results-2025-llm-market/
+results-*/
+cache/
+*.parquet
+*.parquet.part
+*.json.gz

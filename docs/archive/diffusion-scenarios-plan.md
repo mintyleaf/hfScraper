@@ -1,6 +1,6 @@
 ## Plan: Diffusion-затраты через сценарии-профили (hfScraper SAM)
 
-**TL;DR.** Diffusion-затраты как два именованных compute-профиля-сценария (консервативный/верхний уровень бюджета) в `catalog.scenarios.json` по образцу MoE-sensitivity; reported compute сохраняет приоритет, scratch-классификатор и дедупликация не трогаются. Scope согласован: text2img + img2img + text-to-video; assumption-оценки только с явными флагами и отдельным бакетом методов. Move-only разбивка `catalog.go` на тематические файлы пакета `main` уже выполнена и верифицирована (build/vet green, тесты 112/112); поля бюджета и их валидация (A1) применены во внешнем источнике — build exit 0.
+**TL;DR.** Diffusion-затраты как два именованных compute-профиля-сценария (консервативный/верхний уровень бюджета) в `configs/catalog.scenarios.json` по образцу MoE-sensitivity; reported compute сохраняет приоритет, scratch-классификатор и дедупликация не трогаются. Scope согласован: text2img + img2img + text-to-video; assumption-оценки только с явными флагами и отдельным бакетом методов. Move-only разбивка catalog-логики на тематические файлы пакета `main` уже выполнена и верифицирована; поля бюджета и их валидация (A1) применены.
 
 **Контекст-факты (из кода/конфигов)**
 - Один пакет `main`; тематические файлы уже на месте: `catalog_config.go`, `catalog_selection.go`, `catalog_kind.go`, `catalog_record.go`, `catalog_dedup.go`, `catalog_compute.go`, `catalog_run.go`.
@@ -20,17 +20,17 @@ B1. В `catalog_compute.go` оценка для diffusion-base: `6 × N_eff × (
 C1. Детекция diffusion-цели (pipeline_tag ∈ {text-to-image, image-to-image, text-to-video}; консервативные запасные сигналы через существующие паттерны `nonTextModelTagRE`, без новых регулярок). В base-ветке `modelToRecord`: для diffusion-enabled профилей оценка выдаётся даже без scratch-claim; приоритет reported compute оформляется явно. Не-diffusion модели — поведение неизменно.
 
 Фаза D — сценарии и документация (*зависит от B–C*; параллельно с E)
-D1. `catalog.scenarios.json`: два профиля-сценария (консервативный/верхний уровень бюджета, имена и описания по образцу MoE-sensitivity) + один diffusion-selection (pipeline_tags text-to-image/image-to-image/text-to-video, model_kinds base), ссылающийся на оба. Обновить `CATALOG.md`, `HOW-TO-RU.md` (новые поля профилей), методологию: assumption-тиры пересчитываются отдельно и не входят в headline SAM без явного включения.
+D1. `configs/catalog.scenarios.json`: два профиля-сценария (консервативный/верхний уровень бюджета, имена и описания по образцу MoE-sensitivity) + один diffusion-selection (pipeline_tags text-to-image/image-to-image/text-to-video, model_kinds base), ссылающийся на оба. Обновить `docs/CATALOG.md`, `docs/HOW-TO-RU.md` (новые поля профилей), методологию: assumption-тиры пересчитываются отдельно и не входят в headline SAM без явного включения.
 
 Фаза E — тесты (*зависит от B–C*; параллельно с D)
 E1. `main_test.go`: юнит-тест арифметики оценки с ожидаемым числом (по образцу ~470); гейтинг diffusion-базы + assumed-флаги; приоритет reported compute; инвариантность не-diffusion моделей; дедупликация идентичных diffusion-карточек по-прежнему схлопывается.
 
 **Relevant files**
-- `/home/bekket/go/src/hfScraper/catalog_compute.go` — функция оценки (B1)
-- `/home/bekket/go/src/hfScraper/catalog_record.go` — гейтинг base-ветки `modelToRecord` (C1)
-- `/home/bekket/go/src/hfScraper/catalog.scenarios.json` — новые профили и selection (D1)
-- `/home/bekket/go/src/hfScraper/main_test.go` — diffusion-fixture уже присутствуют (~333), тесты оценок ~201–470 (E1)
-- `/home/bekket/go/src/hfScraper/CATALOG.md`, `HOW-TO-RU.md`, `METHODOLOGY-2025-RU.md` — документация (D1)
+- `cmd/hfscraper/catalog_compute.go` — функция оценки (B1)
+- `cmd/hfscraper/catalog_record.go` — гейтинг base-ветки `modelToRecord` (C1)
+- `configs/catalog.scenarios.json` — новые профили и selection (D1)
+- `cmd/hfscraper/main_test.go` — diffusion-fixture и тесты оценок (E1)
+- `docs/CATALOG.md`, `docs/HOW-TO-RU.md`, `docs/METHODOLOGY-2025-RU.md` — документация (D1)
 
 **Verification**
 1. Целевые юнит-тесты Фазы E + повторный полный прогон: существующие тесты (~201–470) остаются без изменений; `go build ./... && go vet ./...` green после каждого шага B/C.

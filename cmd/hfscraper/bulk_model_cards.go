@@ -32,33 +32,59 @@ func ensureBulkModelCards(ctx context.Context, client *httpClient, address, path
 		return fmt.Errorf("create bulk cache directory: %w", err)
 	}
 	partial := path + ".part"
-	offset := int64(0)
-	if info, err := os.Stat(partial); err == nil {
-		offset = info.Size()
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", userAgent)
-	if client.token != "" {
-		req.Header.Set("Authorization", "Bearer "+client.token)
-	}
-	if offset > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
-	}
 	// The catalog client has a short whole-request timeout suitable for JSON API
 	// calls. A multi-gigabyte streamed snapshot must not inherit that deadline;
 	// cancellation is still controlled by req.Context().
 	downloadClient := &http.Client{Transport: client.client.Transport}
-	resp, err := downloadClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("download bulk model cards: %w", err)
+	var resp *http.Response
+	offset := int64(0)
+	for attempt := 0; attempt <= client.retries; attempt++ {
+		offset = 0
+		if info, err := os.Stat(partial); err == nil {
+			offset = info.Size()
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("User-Agent", userAgent)
+		if client.token != "" {
+			req.Header.Set("Authorization", "Bearer "+client.token)
+		}
+		if offset > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+		}
+		resp, err = downloadClient.Do(req)
+		if err == nil && (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent) {
+			break
+		}
+		delay := time.Duration(1<<attempt) * time.Second
+		status := "network error"
+		if resp != nil {
+			status = resp.Status
+			if serverDelay := rateLimitDelay(resp.Header); serverDelay > delay {
+				delay = serverDelay
+			}
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+			_ = resp.Body.Close()
+		}
+		if err == nil && resp != nil && !retryableStatus(resp.StatusCode) {
+			return fmt.Errorf("download bulk model cards: HTTP %s", resp.Status)
+		}
+		if attempt == client.retries {
+			if err != nil {
+				return fmt.Errorf("download bulk model cards after %d attempts: %w", attempt+1, err)
+			}
+			return fmt.Errorf("download bulk model cards after %d attempts: HTTP %s", attempt+1, status)
+		}
+		logger.warn("bulk_model_cards_retry", "bulk model-card download request will be retried", map[string]any{"path": partial, "attempt": attempt + 1, "delay_ms": delay.Milliseconds(), "status": status, "offset": offset})
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("download bulk model cards: HTTP %s", resp.Status)
-	}
 	flags := os.O_CREATE | os.O_WRONLY
 	if resp.StatusCode == http.StatusPartialContent && offset > 0 {
 		flags |= os.O_APPEND

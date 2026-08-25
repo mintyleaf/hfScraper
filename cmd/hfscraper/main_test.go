@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -997,7 +999,7 @@ func TestRateLimitDelay(t *testing.T) {
 }
 
 func TestCatalogScenarioConfigIsValid(t *testing.T) {
-	data, err := os.ReadFile("catalog.scenarios.json")
+	data, err := os.ReadFile(filepath.Join("..", "..", "configs", "catalog.scenarios.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1017,7 +1019,7 @@ func TestCatalogScenarioConfigIsValid(t *testing.T) {
 }
 
 func TestProduction2025ConfigIsValid(t *testing.T) {
-	data, err := os.ReadFile("catalog.2025-production.json")
+	data, err := os.ReadFile(filepath.Join("..", "..", "configs", "catalog.2025-production.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1050,7 +1052,7 @@ func TestProduction2025ConfigIsValid(t *testing.T) {
 }
 
 func TestLLMMarket2025ConfigIsValid(t *testing.T) {
-	data, err := os.ReadFile("catalog.2025-llm-market.json")
+	data, err := os.ReadFile(filepath.Join("..", "..", "configs", "catalog.2025-llm-market.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1100,5 +1102,202 @@ func TestAdapterParameterResolutionErrorIsPreserved(t *testing.T) {
 	parameters, message := effectiveParameters(model, nil, map[string]string{"org/base": "metadata unavailable"})
 	if parameters != 0 || message != "metadata unavailable" {
 		t.Fatalf("effectiveParameters() = %d, %q", parameters, message)
+	}
+}
+
+func TestLocalLLMReviewRequiresVerbatimEvidence(t *testing.T) {
+	review := localLLMReview{Kind: "independent_base", Confidence: "high", IndependentlyPretrained: true, Evidence: "invented evidence"}
+	if err := validateLocalLLMReview(&review, "This model was pretrained on 2T tokens."); err == nil {
+		t.Fatal("invented evidence was accepted")
+	}
+	review.Evidence = "pretrained on 2T tokens"
+	if err := validateLocalLLMReview(&review, "This model was pretrained on 2T tokens."); err != nil {
+		t.Fatalf("verbatim evidence rejected: %v", err)
+	}
+}
+
+func TestLocalLLMTrainingYearMustAppearInEvidence(t *testing.T) {
+	review := localLLMReview{
+		Kind: "independent_base", Confidence: "high", IndependentlyPretrained: true,
+		TrainingYears: []int{2025}, Evidence: "Pretraining finished in 2024.",
+	}
+	if err := validateLocalLLMReview(&review, "Pretraining finished in 2024."); err != nil {
+		t.Fatal(err)
+	}
+	if len(review.TrainingYears) != 1 || review.TrainingYears[0] != 2024 {
+		t.Fatalf("expected evidence-derived year, got %v", review.TrainingYears)
+	}
+}
+
+func TestLocalLLMJSONCanFollowReasoningText(t *testing.T) {
+	card := "The current model was pretrained from scratch in 2025."
+	content := `<think>First consider {broken JSON}.</think>
+{"kind":"independent_base","confidence":"high","independently_pretrained":true,"canonical_training_run":"org/model-1b","training_years":[2025],"evidence":"pretrained from scratch in 2025","reason":"direct evidence"}`
+	review, err := parseLocalLLMContent(content, card)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if review.Kind != "independent_base" || review.CanonicalTrainingRun != "org/model-1b" || len(review.TrainingYears) != 1 || review.TrainingYears[0] != 2025 {
+		t.Fatalf("unexpected parsed review: %#v", review)
+	}
+}
+
+func TestDeclaredBaseNeedsLocalEvidenceWhenPopularityFiltersAreDisabled(t *testing.T) {
+	declared := &reportedScratchClaim{EvidenceType: "declared_base_model", Evidence: "Model-7B-Base", ActiveParametersB: 2, TrainingTokensT: 3, TrainingYears: []int{2025}}
+	if got, deterministic := resolveScratchClaimForReview(true, declared, &localLLMReview{Kind: "unknown", Confidence: "low"}); got != nil || deterministic {
+		t.Fatalf("weak declared-base claim must not become costed: got=%#v deterministic=%v", got, deterministic)
+	}
+	review := &localLLMReview{
+		Kind: "independent_base", Confidence: "high", IndependentlyPretrained: true,
+		Evidence: "pretrained from scratch in 2025", TrainingYears: []int{2025},
+	}
+	got, deterministic := resolveScratchClaimForReview(true, declared, review)
+	if got == nil || deterministic || got.EvidenceType != "local_llm_high" || got.ActiveParametersB != 2 || got.TrainingTokensT != 3 || len(got.TrainingYears) != 1 || got.TrainingYears[0] != 2025 {
+		t.Fatalf("expected reviewed scratch claim: got=%#v deterministic=%v", got, deterministic)
+	}
+	explicit := &reportedScratchClaim{EvidenceType: "explicit_scratch", Evidence: "trained from scratch"}
+	if got, deterministic := resolveScratchClaimForReview(true, explicit, nil); got != explicit || !deterministic {
+		t.Fatalf("explicit deterministic evidence should survive: got=%#v deterministic=%v", got, deterministic)
+	}
+}
+
+func TestLocalLLMOpenAICompatibleClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"local-model"}]}`))
+		case "/v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			content := `{"kind":"independent_base","confidence":"high","independently_pretrained":true,"upstream_model":"","canonical_training_run":"org/model-7b","training_years":[2025],"evidence":"pretrained from scratch on 2T tokens","reason":"direct evidence"}`
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": content}}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	config := localLLMConfig{BaseURL: server.URL + "/v1", Model: "local-model", TimeoutSeconds: 5}
+	client := &http.Client{Timeout: 5 * time.Second}
+	if err := probeLocalLLM(context.Background(), client, config); err != nil {
+		t.Fatal(err)
+	}
+	input := localLLMReviewInput{RepoID: "org/model-7b", Card: "The current model was pretrained from scratch on 2T tokens.", CardHash: "hash", CacheKey: "key"}
+	review, err := callLocalLLM(context.Background(), client, config, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if review.Kind != "independent_base" || review.Confidence != "high" || review.CanonicalTrainingRun != "org/model-7b" || review.Source == "" {
+		t.Fatalf("unexpected review: %#v", review)
+	}
+}
+
+func TestLocalLLMHighAndMediumCostTiers(t *testing.T) {
+	profile := computeProfile{Name: "formula", GPUName: "H100", GPUTFLOPS: 989, Efficiency: 0.4, GPUHourCostUSD: 1.85, TokensPerParameter: 20, Machines: 1, GPUsPerMachine: 1}
+	selection := selectionConfig{Name: "s", FormulaRequiresExplicitScratch: true, ComputeProfiles: []string{"formula"}}
+	model := catalogModel{ID: "org/new-7b", Safetensors: catalogSafetensors{Total: 7_000_000_000}}
+	highReview := &localLLMReview{Kind: "independent_base", Confidence: "high", IndependentlyPretrained: true, Evidence: "pretrained from scratch", CanonicalTrainingRun: "org/new-7b", Source: "local", CardHash: "card"}
+	highClaim := scratchClaimFromLocalLLM(highReview)
+	high := modelToRecordWithReview("https://huggingface.co", model, selection, model.Safetensors.Total, "", map[string]computeProfile{"formula": profile}, nil, highClaim, highReview, false)
+	if high.TrainingCostUSD == nil || high.LowerTrainingCostUSD != nil || high.UpperTrainingCostUSD == nil || high.TrainingCostTier != "llm_high" {
+		t.Fatalf("unexpected high-confidence tier: %#v", high)
+	}
+	mediumReview := *highReview
+	mediumReview.Confidence = "medium"
+	mediumClaim := scratchClaimFromLocalLLM(&mediumReview)
+	medium := modelToRecordWithReview("https://huggingface.co", model, selection, model.Safetensors.Total, "", map[string]computeProfile{"formula": profile}, nil, mediumClaim, &mediumReview, false)
+	if medium.TrainingCostUSD != nil || medium.LowerTrainingCostUSD != nil || medium.UpperTrainingCostUSD == nil || medium.TrainingCostTier != "llm_medium_upper_only" {
+		t.Fatalf("unexpected medium-confidence tier: %#v", medium)
+	}
+}
+
+func TestLocalLLMHighDerivativeOverridesResidualBase(t *testing.T) {
+	model := catalogModel{ID: "org/ambiguous-model", Safetensors: catalogSafetensors{Total: 7_000_000_000}}
+	review := &localLLMReview{Kind: "continued_pretraining", Confidence: "high", Evidence: "continued pretraining"}
+	if got := resolvedCatalogModelKindWithReview(model, &reportedScratchClaim{Evidence: "trained from scratch"}, nil, review); got != "finetune" {
+		t.Fatalf("reviewed kind = %q, want finetune", got)
+	}
+}
+
+func TestLocalLLMCanonicalRunDeduplication(t *testing.T) {
+	aCost, bCost := 100.0, 100.0
+	aUpper, bUpper := 100.0, 100.0
+	records := []catalogRecord{
+		{Selection: "s", RepoID: "mirror/model", EffectiveParameters: 7, Likes: 1, TrainingCostUSD: &aCost, UpperTrainingCostUSD: &aUpper, LocalLLMReview: &localLLMReview{Kind: "independent_base", Confidence: "high", CanonicalTrainingRun: "org/model"}},
+		{Selection: "s", RepoID: "org/model", EffectiveParameters: 7, Likes: 10, TrainingCostUSD: &bCost, UpperTrainingCostUSD: &bUpper, LocalLLMReview: &localLLMReview{Kind: "independent_base", Confidence: "high", CanonicalTrainingRun: "org/model"}},
+	}
+	deduplicateLocalLLMTrainingRuns(records)
+	if records[0].TrainingCostUSD != nil || records[0].UpperTrainingCostUSD != nil || records[1].TrainingCostUSD == nil {
+		t.Fatalf("unexpected local LLM deduplication: %#v", records)
+	}
+}
+
+func TestLocalLLMMarketConfigIsValid(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "configs", "catalog.2025-llm-market.local-llm.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config catalogConfig
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&config); err != nil {
+		t.Fatal(err)
+	}
+	applyCatalogDefaults(&config)
+	if !config.LocalLLM.Enabled || config.LocalLLM.Workers != 4 || config.LocalLLM.MaxInputChars != 12000 || config.Selections[0].DeclaredBaseMinLikes != 0 || config.Selections[0].DeclaredBaseMinDownloads != 0 {
+		t.Fatalf("unexpected local LLM config: %#v", config.LocalLLM)
+	}
+}
+
+func TestSamplingManifestIsDeterministicAndWeightedByCoverageStratum(t *testing.T) {
+	selection := compiledSelection{config: selectionConfig{Name: "text", TargetLLMOnly: true}}
+	makeCandidate := func(id string, parameters int64, covered bool) samplingCandidate {
+		return samplingCandidate{Model: catalogModel{ID: id, Author: "org", Safetensors: catalogSafetensors{Total: parameters}}, Selection: selection, Scope: "text_llm", Params: parameters, Bucket: parameterRange(parameters), Covered: covered}
+	}
+	candidates := []samplingCandidate{
+		makeCandidate("org/large-covered", 70_000_000_000, true),
+		makeCandidate("org/large-missing", 70_000_000_000, false),
+		makeCandidate("org/small-covered-a", 3_000_000_000, true),
+		makeCandidate("org/small-covered-b", 3_000_000_000, true),
+		makeCandidate("org/small-missing-a", 3_000_000_000, false),
+		makeCandidate("org/small-missing-b", 3_000_000_000, false),
+	}
+	include := true
+	config := marketSamplingConfig{Seed: 2025, CensusMinParametersB: 34, SamplePerStratum: 1, MaxTargetedReadmes: 2, IncludeCoveredCensus: &include, IncludeMissingCensus: &include}
+	first, plan, err := buildSamplingManifest(candidates, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := buildSamplingManifest(candidates, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatal("sampling manifest is not deterministic for a fixed seed")
+	}
+	if len(first) != 4 || plan.CensusEntries != 2 || plan.TargetedREADMERequests != 2 {
+		t.Fatalf("manifest=%d census=%d targeted=%d, want 4/2/2", len(first), plan.CensusEntries, plan.TargetedREADMERequests)
+	}
+	for _, entry := range first {
+		if entry.Census && entry.SamplingWeight != 1 {
+			t.Fatalf("census entry %s has weight %v", entry.RepoID, entry.SamplingWeight)
+		}
+		if !entry.Census && entry.SamplingWeight != 2 {
+			t.Fatalf("sample entry %s has weight %v, want 2", entry.RepoID, entry.SamplingWeight)
+		}
+	}
+}
+
+func TestLocalLLMParameterCountRequiresVerbatimEvidence(t *testing.T) {
+	card := "The current model contains 7 billion total parameters."
+	review := localLLMReview{Kind: "unknown", Confidence: "low", ReportedParametersB: 7, ParameterEvidence: "7 billion total parameters"}
+	if err := validateLocalLLMReview(&review, card); err != nil {
+		t.Fatalf("valid parameter evidence rejected: %v", err)
+	}
+	review.ParameterEvidence = "8 billion total parameters"
+	if err := validateLocalLLMReview(&review, card); err != nil {
+		t.Fatalf("bad optional parameter evidence discarded the lineage review: %v", err)
+	}
+	if review.ReportedParametersB != 0 || review.ParameterEvidence != "" {
+		t.Fatal("invented parameter evidence was not cleared")
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"time"
 )
@@ -12,6 +13,8 @@ type catalogConfig struct {
 	Scan       catalogScanConfig    `json:"scan"`
 	Logging    catalogLoggingConfig `json:"logging"`
 	Owners     ownerConfig          `json:"owners"`
+	LocalLLM   localLLMConfig       `json:"local_llm"`
+	Sampling   marketSamplingConfig `json:"sampling"`
 	Compute    []computeProfile     `json:"compute_profiles"`
 	Selections []selectionConfig    `json:"selections"`
 }
@@ -32,11 +35,13 @@ type catalogScanConfig struct {
 	TimeoutSeconds         int      `json:"timeout_seconds"`
 	Retries                *int     `json:"retries"`
 	Quiet                  bool     `json:"quiet"`
+	StopAfterPreLLM        bool     `json:"stop_after_pre_llm"`
 }
 
 type ownerConfig struct {
-	Enabled *bool `json:"enabled"`
-	Workers int   `json:"workers"`
+	Enabled    *bool `json:"enabled"`
+	CostedOnly bool  `json:"costed_only"`
+	Workers    int   `json:"workers"`
 }
 
 type selectionConfig struct {
@@ -49,6 +54,7 @@ type selectionConfig struct {
 	Libraries                        []string `json:"libraries"`
 	ModelKinds                       []string `json:"model_kinds"`
 	TargetLLMOnly                    bool     `json:"target_llm_only"`
+	TargetDiffusionOnly              bool     `json:"target_diffusion_only"`
 	OwnerTypes                       []string `json:"owner_types"`
 	TagsAny                          []string `json:"tags_any"`
 	TagsAll                          []string `json:"tags_all"`
@@ -90,17 +96,17 @@ type computeProfile struct {
 }
 
 type computeEstimate struct {
-	Profile   string  `json:"profile"`
-	GPUName   string  `json:"gpu_name"`
-	Machines  int     `json:"machines"`
-	TotalGPUs int     `json:"total_gpus"`
-	GPUHours  float64 `json:"gpu_hours"`
-	WallDays  float64 `json:"wall_days"`
-	CostUSD   float64 `json:"cost_usd"`
-	Fraction  float64 `json:"training_fraction"`
-	Method    string  `json:"method,omitempty"`
-	Source    string  `json:"source,omitempty"`
-	AssumedBudget bool `json:"assumed_budget,omitempty"`
+	Profile       string  `json:"profile"`
+	GPUName       string  `json:"gpu_name"`
+	Machines      int     `json:"machines"`
+	TotalGPUs     int     `json:"total_gpus"`
+	GPUHours      float64 `json:"gpu_hours"`
+	WallDays      float64 `json:"wall_days"`
+	CostUSD       float64 `json:"cost_usd"`
+	Fraction      float64 `json:"training_fraction"`
+	Method        string  `json:"method,omitempty"`
+	Source        string  `json:"source,omitempty"`
+	AssumedBudget bool    `json:"assumed_budget,omitempty"`
 }
 
 type catalogSafetensors struct {
@@ -133,30 +139,34 @@ type catalogModel struct {
 }
 
 type catalogRecord struct {
-	Selection           string                   `json:"selection"`
-	Description         string                   `json:"selection_description,omitempty"`
-	RepoID              string                   `json:"repo_id"`
-	RepoURL             string                   `json:"repo_url"`
-	Owner               string                   `json:"owner"`
-	OwnerType           string                   `json:"owner_type"`
-	CreatedAt           string                   `json:"created_at"`
-	LastModified        string                   `json:"last_modified"`
-	PipelineTag         string                   `json:"pipeline_tag"`
-	LibraryName         string                   `json:"library_name"`
-	ModelKind           string                   `json:"model_kind"`
-	BaseModel           string                   `json:"base_model,omitempty"`
-	OwnParameters       int64                    `json:"own_parameters,omitempty"`
-	EffectiveParameters int64                    `json:"effective_parameters,omitempty"`
-	ParametersB         *float64                 `json:"parameters_b,omitempty"`
-	Downloads           int64                    `json:"downloads"`
-	Likes               int64                    `json:"likes"`
-	Tags                []string                 `json:"tags"`
-	Compute             []computeEstimate        `json:"compute_estimates,omitempty"`
-	ReportedCompute     *reportedTrainingCompute `json:"reported_training_compute,omitempty"`
-	ScratchClaim        *reportedScratchClaim    `json:"scratch_training_claim,omitempty"`
-	TrainingCostUSD     *float64                 `json:"training_cost_usd,omitempty"`
-	TrainingCostMethod  string                   `json:"training_cost_method,omitempty"`
-	Errors              []string                 `json:"errors,omitempty"`
+	Selection            string                   `json:"selection"`
+	Description          string                   `json:"selection_description,omitempty"`
+	RepoID               string                   `json:"repo_id"`
+	RepoURL              string                   `json:"repo_url"`
+	Owner                string                   `json:"owner"`
+	OwnerType            string                   `json:"owner_type"`
+	CreatedAt            string                   `json:"created_at"`
+	LastModified         string                   `json:"last_modified"`
+	PipelineTag          string                   `json:"pipeline_tag"`
+	LibraryName          string                   `json:"library_name"`
+	ModelKind            string                   `json:"model_kind"`
+	BaseModel            string                   `json:"base_model,omitempty"`
+	OwnParameters        int64                    `json:"own_parameters,omitempty"`
+	EffectiveParameters  int64                    `json:"effective_parameters,omitempty"`
+	ParametersB          *float64                 `json:"parameters_b,omitempty"`
+	Downloads            int64                    `json:"downloads"`
+	Likes                int64                    `json:"likes"`
+	Tags                 []string                 `json:"tags"`
+	Compute              []computeEstimate        `json:"compute_estimates,omitempty"`
+	ReportedCompute      *reportedTrainingCompute `json:"reported_training_compute,omitempty"`
+	ScratchClaim         *reportedScratchClaim    `json:"scratch_training_claim,omitempty"`
+	LocalLLMReview       *localLLMReview          `json:"local_llm_review,omitempty"`
+	TrainingCostUSD      *float64                 `json:"training_cost_usd,omitempty"`
+	TrainingCostMethod   string                   `json:"training_cost_method,omitempty"`
+	TrainingCostTier     string                   `json:"training_cost_tier,omitempty"`
+	LowerTrainingCostUSD *float64                 `json:"lower_training_cost_usd,omitempty"`
+	UpperTrainingCostUSD *float64                 `json:"upper_training_cost_usd,omitempty"`
+	Errors               []string                 `json:"errors,omitempty"`
 }
 
 type ownerOverview struct {
@@ -242,6 +252,7 @@ type catalogSummary struct {
 
 type selectionSummary struct {
 	Description          string             `json:"description,omitempty"`
+	MarketScope          string             `json:"market_scope"`
 	Models               int                `json:"models"`
 	UniqueOwners         int                `json:"unique_owners"`
 	OwnerTypes           map[string]int     `json:"owner_types"`
@@ -251,6 +262,14 @@ type selectionSummary struct {
 	TotalLikes           int64              `json:"total_likes"`
 	KnownTrainingCosts   int                `json:"known_training_costs"`
 	TotalTrainingCostUSD float64            `json:"total_training_cost_usd"`
+	LowerCostedModels    int                `json:"lower_costed_models"`
+	LowerTrainingCostUSD float64            `json:"lower_training_cost_usd"`
+	UpperCostedModels    int                `json:"upper_costed_models"`
+	UpperTrainingCostUSD float64            `json:"upper_training_cost_usd"`
+	LocalLLMReviewed     int                `json:"local_llm_reviewed"`
+	LocalLLMHigh         int                `json:"local_llm_high_confidence"`
+	LocalLLMMedium       int                `json:"local_llm_medium_confidence"`
+	LocalLLMLow          int                `json:"local_llm_low_or_unknown"`
 	Formula20HybridUSD   float64            `json:"formula_20tpp_moe_active_hybrid_total_usd"`
 	Formula20LiteralUSD  float64            `json:"formula_20tpp_literal_total_parameters_total_usd"`
 	CostedModelsByKind   map[string]int     `json:"costed_models_by_kind"`
@@ -295,6 +314,57 @@ func applyCatalogDefaults(config *catalogConfig) {
 	}
 	if config.Owners.Workers == 0 {
 		config.Owners.Workers = 8
+	}
+	if config.LocalLLM.BaseURL == "" {
+		config.LocalLLM.BaseURL = os.Getenv("HF_LLM_BASE_URL")
+	}
+	if config.LocalLLM.Scope == "" {
+		config.LocalLLM.Scope = "text_llm"
+	}
+	if config.LocalLLM.Model == "" {
+		config.LocalLLM.Model = os.Getenv("HF_LLM_MODEL")
+	}
+	if config.LocalLLM.Workers == 0 {
+		config.LocalLLM.Workers = 4
+	}
+	if config.LocalLLM.TimeoutSeconds == 0 {
+		config.LocalLLM.TimeoutSeconds = 180
+	}
+	if config.LocalLLM.MaxInputChars == 0 {
+		config.LocalLLM.MaxInputChars = 12000
+	}
+	if config.LocalLLM.CacheFile == "" {
+		config.LocalLLM.CacheFile = "cache/local-llm-review-v1.jsonl"
+	}
+	if config.Sampling.Seed == 0 {
+		config.Sampling.Seed = 2025
+	}
+	if config.Sampling.CensusMinParametersB == 0 {
+		config.Sampling.CensusMinParametersB = 34
+	}
+	if config.Sampling.SamplePerStratum == 0 {
+		config.Sampling.SamplePerStratum = 150
+	}
+	if config.Sampling.MaxTargetedReadmes == 0 {
+		config.Sampling.MaxTargetedReadmes = 3000
+	}
+	if config.Sampling.ReadmeWorkers == 0 {
+		config.Sampling.ReadmeWorkers = 1
+	}
+	if config.Sampling.ReadmeCacheDir == "" {
+		config.Sampling.ReadmeCacheDir = "cache/targeted-readmes"
+	}
+	if config.Sampling.ManifestFile == "" {
+		config.Sampling.ManifestFile = "sampling-manifest.json"
+	}
+	if config.Sampling.ResultsFile == "" {
+		config.Sampling.ResultsFile = "sampling-results.json"
+	}
+	if config.Sampling.SummaryFile == "" {
+		config.Sampling.SummaryFile = "sampling-summary.json"
+	}
+	if config.Sampling.ReportFile == "" {
+		config.Sampling.ReportFile = "sampling-report.md"
 	}
 	for i := range config.Selections {
 		if config.Selections[i].SortBy == "" {

@@ -42,7 +42,7 @@
 
 ## Формула
 
-После подстановки констант из `formula.txt`:
+После подстановки констант из `docs/formula.txt`:
 
 ```text
 full_training_cost(P) = 155.881361644759 × P² USD

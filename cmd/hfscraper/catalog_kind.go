@@ -5,6 +5,11 @@ import (
 	"strings"
 )
 
+var (
+	diffusionExcludedDomainRE = regexp.MustCompile(`(?i)(video|audio|speech|music|vision-language|multimodal|\bvlm\b|protein|genomic|\bdna\b)`)
+	diffusionTargetRE         = regexp.MustCompile(`(?i)(diffusers?|stable[-_ ]?diffusion|sdxl|image[-_ ]?generation|text[-_ ]?to[-_ ]?image|image[-_ ]?to[-_ ]?image|(^|[-_./])flux($|[-_./0-9]))`)
+)
+
 func catalogModelKind(model catalogModel) string {
 	if kind := catalogKnownKindOverrides[model.ID]; kind != "" {
 		return kind
@@ -57,6 +62,21 @@ func catalogIsTargetLLM(model catalogModel) bool {
 	return llmSignalRE.MatchString(joined)
 }
 
+func catalogIsTargetDiffusion(model catalogModel) bool {
+	pipeline := strings.ToLower(model.PipelineTag)
+	switch pipeline {
+	case "text-to-image", "image-to-image", "unconditional-image-generation":
+		return true
+	case "text-to-video", "image-to-video", "video-generation", "audio-to-audio", "text-to-speech":
+		return false
+	}
+	joined := strings.ToLower(model.ID + " " + strings.Join(model.Tags, " "))
+	if diffusionExcludedDomainRE.MatchString(joined) {
+		return false
+	}
+	return diffusionTargetRE.MatchString(joined)
+}
+
 // The requested accounting treats instruct/chat/SFT-style repositories as
 // derivatives: their full-pretraining formula must not be charged merely
 // because the card also describes an underlying scratch stage. Only residual
@@ -66,6 +86,13 @@ func catalogScratchOverrideEligible(model catalogModel) bool {
 }
 
 func resolvedCatalogModelKind(model catalogModel, scratch *reportedScratchClaim, reported *reportedTrainingCompute) string {
+	return resolvedCatalogModelKindWithReview(model, scratch, reported, nil)
+}
+
+func resolvedCatalogModelKindWithReview(model catalogModel, scratch *reportedScratchClaim, reported *reportedTrainingCompute, review *localLLMReview) string {
+	if reviewedKind := localLLMKind(review); reviewedKind != "" {
+		return reviewedKind
+	}
 	kind := catalogModelKind(model)
 	if scratch != nil && catalogScratchOverrideEligible(model) {
 		return "base"

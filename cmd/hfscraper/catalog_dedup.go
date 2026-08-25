@@ -50,6 +50,8 @@ func deduplicateReportedTrainingRuns(records []catalogRecord) {
 				continue
 			}
 			records[index].TrainingCostUSD = nil
+			records[index].LowerTrainingCostUSD = nil
+			records[index].UpperTrainingCostUSD = nil
 			records[index].TrainingCostMethod = "duplicate_reported_training_run"
 			records[index].Compute = nil
 			records[index].Errors = append(records[index].Errors, "cost counted once under canonical repository "+records[canonical].RepoID)
@@ -104,6 +106,8 @@ func deduplicateReportedTrainingRuns(records []catalogRecord) {
 				continue
 			}
 			records[index].TrainingCostUSD = nil
+			records[index].LowerTrainingCostUSD = nil
+			records[index].UpperTrainingCostUSD = nil
 			records[index].TrainingCostMethod = "duplicate_reported_training_trajectory"
 			records[index].Compute = nil
 			records[index].Errors = append(records[index].Errors, "reported trajectory cost counted once under cumulative repository "+records[canonical].RepoID)
@@ -130,6 +134,8 @@ func deduplicateReportedDerivativeAgainstBase(records []catalogRecord) {
 		}
 		if canonical := baseRuns[records[index].Selection+"\x00"+reported.RunHash]; canonical != "" {
 			records[index].TrainingCostUSD = nil
+			records[index].LowerTrainingCostUSD = nil
+			records[index].UpperTrainingCostUSD = nil
 			records[index].TrainingCostMethod = "duplicate_reported_base_training_run"
 			records[index].Compute = nil
 			records[index].Errors = append(records[index].Errors, "reported compute belongs to canonical base repository "+canonical)
@@ -170,6 +176,8 @@ func deduplicateScratchTrainingRuns(records []catalogRecord) {
 				continue
 			}
 			records[index].TrainingCostUSD = nil
+			records[index].LowerTrainingCostUSD = nil
+			records[index].UpperTrainingCostUSD = nil
 			records[index].TrainingCostMethod = "duplicate_scratch_training_run"
 			records[index].Compute = nil
 			records[index].Errors = append(records[index].Errors, "scratch cost counted once under canonical repository "+records[canonical].RepoID)
@@ -209,6 +217,8 @@ func deduplicateScratchTrainingRuns(records []catalogRecord) {
 				continue
 			}
 			records[index].TrainingCostUSD = nil
+			records[index].LowerTrainingCostUSD = nil
+			records[index].UpperTrainingCostUSD = nil
 			records[index].TrainingCostMethod = "duplicate_scratch_training_trajectory"
 			records[index].Compute = nil
 			records[index].Errors = append(records[index].Errors, "scratch trajectory cost counted once under canonical repository "+records[canonical].RepoID)
@@ -247,9 +257,57 @@ func deduplicateScratchTrainingRuns(records []catalogRecord) {
 				continue
 			}
 			records[index].TrainingCostUSD = nil
+			records[index].LowerTrainingCostUSD = nil
+			records[index].UpperTrainingCostUSD = nil
 			records[index].TrainingCostMethod = "duplicate_base_family_mirror"
 			records[index].Compute = nil
 			records[index].Errors = append(records[index].Errors, "base-family cost counted once under canonical repository "+records[canonical].RepoID)
+		}
+	}
+}
+
+// deduplicateLocalLLMTrainingRuns joins rewritten mirrors which do not share an
+// exact card/evidence hash. The local reviewer must supply a stable canonical
+// run identity; exact parameter count remains mandatory so independently
+// trained sizes in one family are never collapsed together.
+func deduplicateLocalLLMTrainingRuns(records []catalogRecord) {
+	groups := make(map[string][]int)
+	for index := range records {
+		review := records[index].LocalLLMReview
+		if review == nil || review.Kind != "independent_base" || (review.Confidence != "high" && review.Confidence != "medium") || records[index].UpperTrainingCostUSD == nil {
+			continue
+		}
+		canonicalRun := normalizeCanonicalRun(review.CanonicalTrainingRun)
+		if len(canonicalRun) < 6 || canonicalRun == "unknown" {
+			continue
+		}
+		key := records[index].Selection + "\x00" + canonicalRun + "\x00" + strconv.FormatInt(records[index].EffectiveParameters, 10)
+		groups[key] = append(groups[key], index)
+	}
+	for _, indices := range groups {
+		if len(indices) < 2 {
+			continue
+		}
+		canonical := indices[0]
+		for _, index := range indices[1:] {
+			a, b := records[index], records[canonical]
+			aHigh := a.LocalLLMReview != nil && a.LocalLLMReview.Confidence == "high"
+			bHigh := b.LocalLLMReview != nil && b.LocalLLMReview.Confidence == "high"
+			if aHigh && !bHigh || (aHigh == bHigh && (a.Likes > b.Likes || (a.Likes == b.Likes && (a.Downloads > b.Downloads || (a.Downloads == b.Downloads && a.CreatedAt < b.CreatedAt))))) {
+				canonical = index
+			}
+		}
+		for _, index := range indices {
+			if index == canonical {
+				continue
+			}
+			records[index].TrainingCostUSD = nil
+			records[index].LowerTrainingCostUSD = nil
+			records[index].UpperTrainingCostUSD = nil
+			records[index].TrainingCostMethod = "duplicate_local_llm_training_run"
+			records[index].TrainingCostTier = "duplicate"
+			records[index].Compute = nil
+			records[index].Errors = append(records[index].Errors, "local-LLM canonical run counted once under "+records[canonical].RepoID)
 		}
 	}
 }

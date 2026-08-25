@@ -1,0 +1,107 @@
+{
+  "endpoint": "https://huggingface.co",
+  "output_dir": "results-2025-llm-market-local-llm",
+  "logging": {
+    "level": "info",
+    "file": "catalog.log.jsonl",
+    "stderr": true,
+    "http_requests": false,
+    "skipped_records": false
+  },
+  "scan": {
+    "now": "",
+    "page_size": 1000,
+    "max_pages": 0,
+    "require_weights": true,
+    "resolve_base_parameters": false,
+    "resolve_reported_compute": true,
+    "resolve_scratch_claims": true,
+    "fetch_individual_readmes": false,
+    "catalog_checkpoint": "../results-2025-production/cache/catalog-2025.json.gz",
+    "bulk_model_cards_urls": [
+      "https://huggingface.co/datasets/librarian-bots/model_cards_with_metadata/resolve/refs%2Fconvert%2Fparquet/default/train/0000.parquet",
+      "https://huggingface.co/datasets/librarian-bots/model_cards_with_metadata/resolve/refs%2Fconvert%2Fparquet/default/train/0001.parquet",
+      "https://huggingface.co/datasets/librarian-bots/model_cards_with_metadata/resolve/refs%2Fconvert%2Fparquet/default/train/0002.parquet",
+      "https://huggingface.co/datasets/librarian-bots/model_cards_with_metadata/resolve/refs%2Fconvert%2Fparquet/default/train/0003.parquet",
+      "https://huggingface.co/datasets/librarian-bots/model_cards_with_metadata/resolve/refs%2Fconvert%2Fparquet/default/train/0004.parquet"
+    ],
+    "bulk_model_cards_file": "../results-2025-production/cache/model-cards.parquet",
+    "timeout_seconds": 45,
+    "retries": 8,
+    "quiet": false
+  },
+  "local_llm": {
+    "enabled": true,
+    "scope": "text_llm",
+    "base_url": "",
+    "model": "",
+    "api_key_env": "",
+    "workers": 4,
+    "timeout_seconds": 180,
+    "max_input_chars": 12000,
+    "cache_file": "cache/local-llm-review-v1.jsonl"
+  },
+  "owners": {
+    "enabled": true,
+    "costed_only": true,
+    "workers": 4
+  },
+  "compute_profiles": [
+    {
+      "name": "formula_txt_h100",
+      "description": "formula.txt: reported tokens when available, fallback 20 tokens/parameter, 6NT FLOPs, H100 989 TFLOPS at 40% efficiency and USD 1.85/GPU-hour",
+      "gpu_name": "NVIDIA H100",
+      "gpu_tflops": 989,
+      "efficiency": 0.4,
+      "gpu_hour_cost_usd": 1.85,
+      "tokens_per_parameter": 20,
+      "machines": 1,
+      "gpus_per_machine": 1,
+      "finetune_compute_fraction": 0
+    }
+  ],
+  "selections": [
+    {
+      "name": "public_text_llm_2025",
+      "description": "Public 2025 text LLM repositories with local-LLM lineage review; central estimate uses high-confidence independent base runs and reported derivative compute",
+      "created_from": "2025-01-01",
+      "created_to": "2025-12-31",
+      "target_llm_only": true,
+      "exclude_tags": [
+        "diffusers",
+        "stable-diffusion",
+        "text-to-image",
+        "image-to-image",
+        "image-generation",
+        "text-to-video",
+        "video-generation",
+        "computer-vision",
+        "vision-language",
+        "multimodal",
+        "audio",
+        "speech"
+      ],
+      "model_kinds": [
+        "base",
+        "fork",
+        "finetune",
+        "adapter",
+        "quantized",
+        "merge"
+      ],
+      "sort_by": "repo_id",
+      "sort_direction": "asc",
+      "limit": 0,
+      "compute_profiles": [
+        "formula_txt_h100"
+      ],
+      "require_reported_compute": false,
+      "require_reported_derivative_compute": false,
+      "require_explicit_scratch_for_base": false,
+      "formula_requires_explicit_scratch": true,
+      "count_reported_derivative_costs": true,
+      "declared_base_min_likes": 0,
+      "declared_base_min_downloads": 0
+    }
+  ]
+}

@@ -6,21 +6,21 @@ scratch-моделей рассмотрен отдельно в конце.
 ## 1. Запуск
 
 ```bash
-go run . catalog [flags]
+go run ./cmd/hfscraper catalog [flags]
 ```
 
 Доступные CLI-флаги:
 
-- `--config <path>` — JSON-конфиг. Default: `catalog.example.json`.
+- `--config <path>` — JSON-конфиг. Default: `configs/catalog.example.json`.
 - `--output <path>` — переопределяет `output_dir` из JSON.
 - `--help`, `-h` — справка.
 
 Примеры:
 
 ```bash
-go run . catalog
-go run . catalog --config configs/llm.json --output results/llm
-HF_TOKEN=hf_... go run . catalog --config catalog.example.json
+go run ./cmd/hfscraper catalog
+go run ./cmd/hfscraper catalog --config configs/llm.json --output results/llm
+HF_TOKEN=hf_... go run ./cmd/hfscraper catalog --config configs/catalog.example.json
 ```
 
 `HF_TOKEN` используется для аутентифицированных запросов и доступных токену
@@ -133,4 +133,4 @@ gated repositories. В результаты токен не записывает
 
 - Поля `diffusion_image_budget` и `latent_sequence_length` активны только для профилей с обоими значениями > 0
 - Все оценки, созданные по этим профилям, помечаются флагом `assumed_budget: true`
-- Оценка стоимости для diffusion моделей выполняется по формуле: `6 × N_eff × (N_total × бюджет)` 
+- Оценка стоимости для diffusion моделей выполняется по формуле: `6 × N_eff × (N_total × бюджет)`

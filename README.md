@@ -24,13 +24,13 @@
 Требуется Go 1.24.9+.
 
 ```bash
-go run . --years 2025,2026 --output results
+go run ./cmd/hfscraper --years 2025,2026 --output results
 ```
 
 Короткая проверка только первой страницы (это **не итоговый подсчёт**):
 
 ```bash
-go run . --page-size 20 --max-pages 1 --output smoke-results
+go run ./cmd/hfscraper --page-size 20 --max-pages 1 --output smoke-results
 ```
 
 В таком отчёте `complete` будет `false`.
@@ -38,7 +38,7 @@ go run . --page-size 20 --max-pages 1 --output smoke-results
 Для gated-репозиториев можно передать read-only токен через переменную окружения:
 
 ```bash
-HF_TOKEN=hf_... go run .
+HF_TOKEN=hf_... go run ./cmd/hfscraper
 ```
 
 Полный обход может занять много времени: API просматривается от новых моделей к
@@ -59,7 +59,7 @@ HF_TOKEN=hf_... go run .
 
 ```bash
 go test ./...
-go run . --help
+go run ./cmd/hfscraper --help
 ```
 
 Алгоритм сначала исключает репозитории без распознанного файла весов, с
@@ -71,41 +71,99 @@ MXNet, scikit-learn и некоторые экспортные форматы. �
 не считаются. Затем README оставшихся репозиториев проверяется на явные формулировки
 `trained/pretrained from scratch`, `trained from random initialization` и их
 несколько языковых вариантов. Все эвристики находятся в начале
-`main.go` и легко расширяются.
+`cmd/hfscraper/scratch.go` и легко расширяются.
+
+## Структура репозитория
+
+```text
+cmd/hfscraper/  CLI и логика скрейпера
+configs/        готовые конфигурации catalog-режима
+docs/           инструкции, методология и формула расчёта
+reports/        исследовательские отчёты
+results/        сохранённые результаты запусков
+```
 
 ## Каталог моделей и владельцев
+
+### Стратифицированная оценка text + diffusion
+
+Воспроизводимая выборка с полным census моделей от 34B, bounded README-fetch и локальной LLM описана в [docs/STRATIFIED-MARKET-2025-RU.md](docs/STRATIFIED-MARKET-2025-RU.md).
+
+Безопасный plan-only запуск не использует сеть, LLM и не считает стоимость:
+
+```bash
+go run ./cmd/hfscraper market-sample --config configs/catalog.2025-stratified-market.local-llm.json
+```
+
+Боевой запуск требует явного флага `--execute`:
+
+```bash
+HF_LLM_BASE_URL=http://127.0.0.1:11434/v1 HF_LLM_MODEL=qwen2.5:14b go run ./cmd/hfscraper market-sample --config configs/catalog.2025-stratified-market.local-llm.json --execute
+```
 
 Для настраиваемых выборок по популярности, размеру, типу модели и владельцу
 используйте режим `catalog`:
 
 ```bash
-go run . catalog --config catalog.example.json
+go run ./cmd/hfscraper catalog --config configs/catalog.example.json
 ```
 
 Он сохраняет модели и профили владельцев в CSV и JSON. Поддерживаются несколько
 выборок за один проход API, base/fine-tune/adapter-фильтры, диапазоны параметров,
 периоды, теги, pipeline, сортировка, лимиты и расчёт времени обучения на разных
-конфигурациях кластера. Полное описание: [CATALOG.md](CATALOG.md).
+конфигурациях кластера. Полное описание: [docs/CATALOG.md](docs/CATALOG.md).
 
-Совсем пошаговая инструкция для первого запуска: [HOW-TO-RU.md](HOW-TO-RU.md).
+Совсем пошаговая инструкция для первого запуска: [docs/HOW-TO-RU.md](docs/HOW-TO-RU.md).
 
 ### Боевой расчёт стоимости за 2025 год
 
 Подробное описание источников, формул, дедупликации, аудита и ограничений:
-[METHODOLOGY-2025-RU.md](METHODOLOGY-2025-RU.md).
+[docs/LOCAL-LLM-2025-RU.md](docs/LOCAL-LLM-2025-RU.md). Старый строгий проход
+сохранён отдельно как [архив](docs/METHODOLOGY-2025-RU.md).
 
-Последний полный LLM-only проход: **$50,545,833.34** H100-equivalent compute
-для 1,094 дедуплицированных training run: 545 base, 334 fine-tune и 215
-adapter/LoRA/QLoRA. В рыночной выборке 447,533 публичных text LLM-репозитория;
-base, forks, fine-tune, adapters, quantized/conversion и merge показаны отдельно.
+Пошаговый документ для согласования процесса с заказчиком:
+[docs/PROCESS-2025-CUSTOMER-APPROVAL-RU.md](docs/PROCESS-2025-CUSTOMER-APPROVAL-RU.md).
 
-Готовый конфиг без ограничения числа результатов и размера модели:
+Старый строгий результат на 1,094 costed-репозитория не является оценкой всего
+рынка: он отражал только строки, которые прошли узкие регулярные выражения.
+Используйте новый проход с локальной LLM, без popularity-порогов. Он выводит
+аудируемые lower, central и upper суммы и отдельно показывает число всех
+репозиториев и дедуплицированных training runs.
+
+Рекомендуемый боевой конфиг без ограничения размера модели:
 
 ```bash
-go run . catalog --config catalog.2025-llm-market.json
+HF_LLM_BASE_URL=http://127.0.0.1:11434/v1 HF_LLM_MODEL=qwen2.5:7b go run ./cmd/hfscraper catalog --config configs/catalog.2025-llm-market.local-llm.json
 ```
 
-Для base-моделей уравнение `6 × N × T` из `formula.txt` применяется только при
+Срочный совместный проход text + diffusion без локальной LLM:
+
+```bash
+go run ./cmd/hfscraper catalog --config configs/catalog.2025-text-and-diffusion.no-llm.json
+```
+
+Только быстрый API-массив preliminary base для обеих выборок, без Parquet и без
+LLM-нагрузки:
+
+```bash
+go run ./cmd/hfscraper catalog --config configs/catalog.2025-text-and-diffusion.no-llm.json --pre-llm-only
+```
+
+Отдельный diffusion-проход с той же local-LLM lineage-проверкой:
+
+```bash
+HF_LLM_BASE_URL=http://127.0.0.1:11434/v1 HF_LLM_MODEL=qwen2.5:7b go run ./cmd/hfscraper catalog --config configs/catalog.2025-diffusion-market.local-llm.json
+```
+
+До model-card/LLM этапа каждый проход создаёт `pre-llm-summary.json` и отдельные
+JSON/CSV-массивы всех preliminary base-кандидатов. Год задаётся только
+`created_from`/`created_to` в selection; 2025 — значение текущих отчётных
+конфигов, а не ограничение алгоритма.
+
+Старый `configs/catalog.2025-llm-market.json` оставлен только для воспроизводимости
+строгого regex-only подхода.
+
+Для base-моделей уравнение `6 × N × T` из `docs/formula.txt` применяется только при
 подтверждении независимого pretraining и известных параметрах. Reported token
 budget имеет приоритет, иначе используется fallback 20 токенов/параметр. Для
 MoE учитываются опубликованные active parameters. Остаточный класс `base` сам по
@@ -128,17 +186,15 @@ model cards (около 1.28 ГБ суммарно на момент напис�
 `results-2025-production/cache/` и затем ищет compute локально. Незавершённая
 загрузка продолжается из файла `.part`. Полный проход
 каталога также сохраняется как gzip-checkpoint, поэтому повторный запуск не
-сканирует 1.8 млн записей заново. Профили владельцев в production-конфиге не
-обогащаются отдельными API-запросами: имена и суммы владельцев сохраняются, а тип
-остаётся `unknown`, что предотвращает ещё один многодневный rate-limited этап.
+сканирует весь Hub заново. В новом local-LLM конфиге user/organization-профили
+запрашиваются только для владельцев, вошедших в central estimate; остальные
+сохраняются с типом `unknown`, чтобы не добавлять десятки тысяч API-запросов.
 
-Главные результаты находятся в `results-2025-llm-market/models.csv`,
+Главные результаты нового прохода находятся в
+`results-2025-llm-market-local-llm/models.csv`,
 `owners.csv`, `summary.json` и готовом `report.md`. Поля `training_cost_usd`
 содержат сумму в долларах, а `training_cost_method` отмечает расчёт scratch по
-`formula.txt`.
+`docs/formula.txt`.
 
-`summary.json` отдельно показывает pretraining-кандидатов, категории рынка,
-размерные диапазоны base, subtotals по методам и sensitivity-сценарии: $20.57M
-при строгих 20 tokens/parameter с active MoE и $271.57M при буквальном total².
 Результат является formula-equivalent оценкой H100 compute, а не бухгалтерской
 суммой: Hub не требует публиковать фактическое железо, длительность или счета.
