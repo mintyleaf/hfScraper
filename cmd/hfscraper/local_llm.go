@@ -93,7 +93,7 @@ type openAIChatRequest struct {
 	Temperature    float64             `json:"temperature"`
 	MaxTokens      int                 `json:"max_tokens"`
 	Stream         bool                `json:"stream"`
-	ResponseFormat map[string]string   `json:"response_format,omitempty"`
+	ResponseFormat map[string]any      `json:"response_format,omitempty"`
 }
 
 type openAIChatMessage struct {
@@ -234,6 +234,47 @@ func localLLMUserPrompt(input localLLMReviewInput) string {
 	return string(encoded)
 }
 
+func localLLMResponseFormat() map[string]any {
+	stringProperty := func() map[string]any {
+		return map[string]any{"type": "string"}
+	}
+	return map[string]any{
+		"type": "json_object",
+		"schema": map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"properties": map[string]any{
+				"kind": map[string]any{
+					"type": "string",
+					"enum": []string{"independent_base", "finetune", "adapter", "continued_pretraining", "fork_or_mirror", "quantized", "merge", "non_text", "unknown"},
+				},
+				"confidence": map[string]any{
+					"type": "string",
+					"enum": []string{"high", "medium", "low"},
+				},
+				"independently_pretrained": map[string]any{"type": "boolean"},
+				"parameter_count_b": map[string]any{
+					"type":    "number",
+					"minimum": 0,
+				},
+				"parameter_evidence":     stringProperty(),
+				"upstream_model":         stringProperty(),
+				"canonical_training_run": stringProperty(),
+				"training_years": map[string]any{
+					"type":  "array",
+					"items": map[string]any{"type": "integer"},
+				},
+				"evidence": stringProperty(),
+				"reason":   stringProperty(),
+			},
+			"required": []string{
+				"kind", "confidence", "independently_pretrained", "parameter_count_b", "parameter_evidence",
+				"upstream_model", "canonical_training_run", "training_years", "evidence", "reason",
+			},
+		},
+	}
+}
+
 func callLocalLLM(ctx context.Context, client *http.Client, config localLLMConfig, input localLLMReviewInput) (localLLMReview, error) {
 	payload := openAIChatRequest{
 		Model: config.Model,
@@ -244,7 +285,7 @@ func callLocalLLM(ctx context.Context, client *http.Client, config localLLMConfi
 		Temperature:    0,
 		MaxTokens:      700,
 		Stream:         false,
-		ResponseFormat: map[string]string{"type": "json_object"},
+		ResponseFormat: localLLMResponseFormat(),
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

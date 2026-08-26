@@ -1168,6 +1168,19 @@ func TestLocalLLMOpenAICompatibleClient(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"local-model"}]}`))
 		case "/v1/chat/completions":
+			var request openAIChatRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode chat request: %v", err)
+			}
+			if request.ResponseFormat["type"] != "json_object" {
+				t.Errorf("response format type = %v, want json_object", request.ResponseFormat["type"])
+			}
+			schema, ok := request.ResponseFormat["schema"].(map[string]any)
+			if !ok {
+				t.Errorf("response format schema = %#v, want object", request.ResponseFormat["schema"])
+			} else if schema["additionalProperties"] != false {
+				t.Errorf("schema additionalProperties = %v, want false", schema["additionalProperties"])
+			}
 			w.Header().Set("Content-Type", "application/json")
 			content := `{"kind":"independent_base","confidence":"high","independently_pretrained":true,"upstream_model":"","canonical_training_run":"org/model-7b","training_years":[2025],"evidence":"pretrained from scratch on 2T tokens","reason":"direct evidence"}`
 			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": content}}}})

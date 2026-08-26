@@ -770,6 +770,7 @@ func reviewSamplingCards(ctx context.Context, config catalogConfig, manifest []s
 				callConfig.Scope = entry.Scope
 				review, callErr := callLocalLLM(ctx, llmClient, callConfig, input)
 				if callErr != nil {
+					logger.warn("sampling_llm_call_failed", "local LLM review failed", map[string]any{"repo_id": entry.RepoID, "error": callErr.Error()})
 					review = localLLMReview{Kind: "unknown", Confidence: "low", Reason: callErr.Error(), Source: "local OpenAI-compatible LLM " + config.LocalLLM.Model, CardHash: cardHash, CacheKey: key}
 					resultMutex.Lock()
 					failed++
