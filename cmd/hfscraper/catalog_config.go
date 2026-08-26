@@ -8,15 +8,16 @@ import (
 )
 
 type catalogConfig struct {
-	Endpoint   string               `json:"endpoint"`
-	OutputDir  string               `json:"output_dir"`
-	Scan       catalogScanConfig    `json:"scan"`
-	Logging    catalogLoggingConfig `json:"logging"`
-	Owners     ownerConfig          `json:"owners"`
-	LocalLLM   localLLMConfig       `json:"local_llm"`
-	Sampling   marketSamplingConfig `json:"sampling"`
-	Compute    []computeProfile     `json:"compute_profiles"`
-	Selections []selectionConfig    `json:"selections"`
+	Endpoint   string                   `json:"endpoint"`
+	OutputDir  string                   `json:"output_dir"`
+	Scan       catalogScanConfig        `json:"scan"`
+	Logging    catalogLoggingConfig     `json:"logging"`
+	Owners     ownerConfig              `json:"owners"`
+	LocalLLM   localLLMConfig           `json:"local_llm"`
+	Sampling   marketSamplingConfig     `json:"sampling"`
+	Derivative derivativeSamplingConfig `json:"derivative_sampling"`
+	Compute    []computeProfile         `json:"compute_profiles"`
+	Selections []selectionConfig        `json:"selections"`
 }
 
 type catalogScanConfig struct {

@@ -26,6 +26,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "derivative-sample" {
+		if err := runDerivativeSamplingCLI(ctx, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	var yearsValue string
 	opts := options{}
