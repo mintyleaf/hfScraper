@@ -1,0 +1,102 @@
+{
+  "endpoint": "https://huggingface.co",
+  "output_dir": "results-2025-derivatives-one-percent",
+  "logging": {
+    "level": "info",
+    "file": "catalog.log.jsonl",
+    "stderr": true,
+    "http_requests": false,
+    "skipped_records": false
+  },
+  "scan": {
+    "now": "",
+    "page_size": 1000,
+    "max_pages": 0,
+    "require_weights": true,
+    "resolve_base_parameters": true,
+    "resolve_reported_compute": false,
+    "resolve_scratch_claims": false,
+    "fetch_individual_readmes": false,
+    "catalog_checkpoint": "../results-2025-production/cache/catalog-2025.json.gz",
+    "timeout_seconds": 45,
+    "retries": 12,
+    "quiet": false
+  },
+  "local_llm": {
+    "enabled": false
+  },
+  "owners": {
+    "enabled": false,
+    "costed_only": true,
+    "workers": 8
+  },
+  "compute_profiles": [
+    {
+      "name": "formula_txt_h100_one_percent",
+      "description": "Text derivatives at 1% of the corresponding base-training formula",
+      "gpu_name": "NVIDIA H100",
+      "gpu_tflops": 989,
+      "efficiency": 0.4,
+      "gpu_hour_cost_usd": 1.85,
+      "tokens_per_parameter": 20,
+      "machines": 1,
+      "gpus_per_machine": 1,
+      "finetune_compute_fraction": 0.01
+    },
+    {
+      "name": "diffusion_parameter_fallback_one_percent",
+      "description": "Diffusion derivatives at 1% of the corresponding base-training formula",
+      "gpu_name": "NVIDIA H100",
+      "gpu_tflops": 989,
+      "efficiency": 0.4,
+      "gpu_hour_cost_usd": 1.85,
+      "tokens_per_parameter": 20,
+      "machines": 1,
+      "gpus_per_machine": 1,
+      "finetune_compute_fraction": 0.01,
+      "diffusion_image_budget": 3,
+      "latent_sequence_length": 1024
+    }
+  ],
+  "selections": [
+    {
+      "name": "public_text_llm_2025_derivatives_one_percent",
+      "description": "Public 2025 text derivatives priced at 1% of corresponding base training",
+      "created_from": "2025-01-01",
+      "created_to": "2025-12-31",
+      "target_llm_only": true,
+      "exclude_tags": ["diffusers", "stable-diffusion", "text-to-image", "image-to-image", "image-generation", "text-to-video", "video-generation", "computer-vision", "vision-language", "multimodal", "audio", "speech"],
+      "model_kinds": ["finetune", "adapter", "fork", "quantized", "merge"],
+      "sort_by": "repo_id",
+      "sort_direction": "asc",
+      "limit": 0,
+      "compute_profiles": ["formula_txt_h100_one_percent"],
+      "require_reported_compute": false,
+      "require_reported_derivative_compute": false,
+      "require_explicit_scratch_for_base": false,
+      "formula_requires_explicit_scratch": false,
+      "count_reported_derivative_costs": false,
+      "declared_base_min_likes": 0,
+      "declared_base_min_downloads": 0
+    },
+    {
+      "name": "public_diffusion_2025_derivatives_one_percent",
+      "description": "Public 2025 diffusion/image derivatives priced at 1% of corresponding base training",
+      "created_from": "2025-01-01",
+      "created_to": "2025-12-31",
+      "target_diffusion_only": true,
+      "model_kinds": ["finetune", "adapter", "fork", "quantized", "merge"],
+      "sort_by": "repo_id",
+      "sort_direction": "asc",
+      "limit": 0,
+      "compute_profiles": ["diffusion_parameter_fallback_one_percent"],
+      "require_reported_compute": false,
+      "require_reported_derivative_compute": false,
+      "require_explicit_scratch_for_base": false,
+      "formula_requires_explicit_scratch": false,
+      "count_reported_derivative_costs": false,
+      "declared_base_min_likes": 0,
+      "declared_base_min_downloads": 0
+    }
+  ]
+}

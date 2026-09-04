@@ -486,6 +486,45 @@ func TestDerivativeNeverReceivesFullPretrainingFormula(t *testing.T) {
 	}
 }
 
+func TestConfiguredDerivativeFractionPricesNonBaseKinds(t *testing.T) {
+	profile := computeProfile{Name: "formula", GPUName: "H100", GPUTFLOPS: 989, Efficiency: .4, GPUHourCostUSD: 1.85, TokensPerParameter: 20, Machines: 1, GPUsPerMachine: 1, FinetuneCostFraction: .01}
+	selection := selectionConfig{Name: "s", ComputeProfiles: []string{"formula"}}
+	models := []catalogModel{
+		{ID: "org/model-finetuned"},
+		{ID: "org/model-lora"},
+		{ID: "org/model-uncensored"},
+		{ID: "org/model-gguf"},
+		{ID: "org/model-merge"},
+	}
+	baseCost := estimateCompute(7_000_000_000, "base", profile).CostUSD
+	for _, model := range models {
+		record := modelToRecordWithReview("https://huggingface.co", model, selection, 7_000_000_000, "", map[string]computeProfile{"formula": profile}, nil, nil, nil, false)
+		if record.ModelKind == "base" || record.TrainingCostUSD == nil {
+			t.Fatalf("%s was not priced as a derivative: %#v", model.ID, record)
+		}
+		if math.Abs(*record.TrainingCostUSD-baseCost*.01) > 1e-6 {
+			t.Fatalf("%s cost = %.12f, want %.12f", model.ID, *record.TrainingCostUSD, baseCost*.01)
+		}
+		if record.TrainingCostMethod != "formula_txt_text_derivative_fraction" || record.TrainingCostTier != "configured_derivative_fraction" {
+			t.Fatalf("%s has unexpected provenance: %#v", model.ID, record)
+		}
+	}
+}
+
+func TestConfiguredDiffusionDerivativeFractionUsesDiffusionFormula(t *testing.T) {
+	profile := computeProfile{Name: "diffusion", GPUName: "H100", GPUTFLOPS: 989, Efficiency: .4, GPUHourCostUSD: 1.85, TokensPerParameter: 20, Machines: 1, GPUsPerMachine: 1, FinetuneCostFraction: .01, DiffusionImageBudget: 3, LatentSequenceLength: 1024}
+	selection := selectionConfig{Name: "s", ComputeProfiles: []string{"diffusion"}}
+	model := catalogModel{ID: "org/image-finetuned", PipelineTag: "text-to-image"}
+	record := modelToRecordWithReview("https://huggingface.co", model, selection, 2_000_000_000, "", map[string]computeProfile{"diffusion": profile}, nil, nil, nil, false)
+	base := estimateDiffusionBaseTrainingCompute(2_000_000_000, nil, profile)
+	if record.TrainingCostUSD == nil || math.Abs(*record.TrainingCostUSD-base.CostUSD*.01) > 1e-6 {
+		t.Fatalf("diffusion derivative cost = %#v, want %.12f", record.TrainingCostUSD, base.CostUSD*.01)
+	}
+	if record.TrainingCostMethod != "formula_txt_diffusion_derivative_fraction" {
+		t.Fatalf("unexpected diffusion derivative method: %q", record.TrainingCostMethod)
+	}
+}
+
 func TestParameterRanges(t *testing.T) {
 	for parameters, want := range map[int64]string{
 		0: "unknown", 1_999_999_999: "<2B", 2_000_000_000: "2-<7B",

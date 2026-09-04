@@ -4,7 +4,7 @@ import "strings"
 
 func estimateCompute(parameters int64, kind string, profile computeProfile) computeEstimate {
 	fraction := 1.0
-	if kind == "finetune" || kind == "adapter" {
+	if kind != "base" {
 		fraction = profile.FinetuneCostFraction
 	}
 	n := float64(parameters)
@@ -16,6 +16,23 @@ func estimateCompute(parameters int64, kind string, profile computeProfile) comp
 		TotalGPUs: totalGPUs, GPUHours: gpuHours, WallDays: gpuHours / float64(totalGPUs) / 24,
 		CostUSD: gpuHours * profile.GPUHourCostUSD, Fraction: fraction,
 	}
+}
+
+func estimateDerivativeTrainingCompute(parameters int64, kind string, diffusion bool, profile computeProfile) computeEstimate {
+	if diffusion && hasDiffusionProfile(profile) {
+		estimate := estimateDiffusionBaseTrainingCompute(parameters, nil, profile)
+		estimate.GPUHours *= profile.FinetuneCostFraction
+		estimate.WallDays *= profile.FinetuneCostFraction
+		estimate.CostUSD *= profile.FinetuneCostFraction
+		estimate.Fraction = profile.FinetuneCostFraction
+		estimate.Method = "formula_txt_diffusion_derivative_fraction"
+		estimate.Source = "configured fraction of the diffusion base-training formula"
+		return estimate
+	}
+	estimate := estimateCompute(parameters, kind, profile)
+	estimate.Method = "formula_txt_text_derivative_fraction"
+	estimate.Source = "configured fraction of the text base-training formula"
+	return estimate
 }
 
 // estimateBaseTrainingCompute keeps formula.txt's 6*N*T accounting while using

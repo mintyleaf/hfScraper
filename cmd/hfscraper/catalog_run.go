@@ -680,6 +680,13 @@ func runCatalog(ctx context.Context, config catalogConfig) (resultErr error) {
 
 func writeMarketReport(directory string, summary catalogSummary, owners map[string]*ownerOverview) error {
 	var report strings.Builder
+	usesDerivativeFraction := false
+	for _, selection := range summary.Selections {
+		if selection.CostedModelsByMethod["formula_txt_text_derivative_fraction"] > 0 || selection.CostedModelsByMethod["formula_txt_diffusion_derivative_fraction"] > 0 {
+			usesDerivativeFraction = true
+			break
+		}
+	}
 	report.WriteString("# Оценка стоимости обучения моделей Hugging Face\n\n")
 	report.WriteString("Снимок сформирован: " + summary.GeneratedAt + "\n\n")
 	names := make([]string, 0, len(summary.Selections))
@@ -701,7 +708,7 @@ func writeMarketReport(directory string, summary catalogSummary, owners map[stri
 			fmt.Fprintf(&report, "- Буквальный upper-сценарий 20 токенов/параметр и total² для MoE: **$%.2f**\n", item.Formula20LiteralUSD)
 		}
 		fmt.Fprintf(&report, "- Репозиториев в целевой выборке: %d\n", item.Models)
-		fmt.Fprintf(&report, "- Самостоятельных training run с рассчитанной стоимостью: %d\n", item.KnownTrainingCosts)
+		fmt.Fprintf(&report, "- Репозиториев с рассчитанной стоимостью: %d\n", item.KnownTrainingCosts)
 		fmt.Fprintf(&report, "- Local-LLM review: %d; high=%d, medium=%d, low/unknown=%d\n", item.LocalLLMReviewed, item.LocalLLMHigh, item.LocalLLMMedium, item.LocalLLMLow)
 		fmt.Fprintf(&report, "- Уникальных владельцев: %d\n", item.UniqueOwners)
 		fmt.Fprintf(&report, "- Скачиваний: %d; likes: %d\n\n", item.TotalDownloads, item.TotalLikes)
@@ -711,21 +718,31 @@ func writeMarketReport(directory string, summary catalogSummary, owners map[stri
 				fmt.Fprintf(&report, "| %s | %d | %d | %.2f |\n", kind, item.ModelKinds[kind], item.CostedModelsByKind[kind], item.TrainingCostByKind[kind])
 			}
 		}
-		report.WriteString("\n### Base по числу параметров\n\n")
-		report.WriteString("| Диапазон | Base-репозиториев | Подтверждённых run с cost | Стоимость, USD |\n|---|---:|---:|---:|\n")
-		for _, bucket := range []string{"<2B", "2-<7B", "7-<13B", "13-<34B", "34-<70B", "70-<120B", "120-<500B", ">=500B", "unknown"} {
-			if item.BaseModelsBySize[bucket] > 0 {
-				fmt.Fprintf(&report, "| %s | %d | %d | %.2f |\n", bucket, item.BaseModelsBySize[bucket], item.CostedBaseBySize[bucket], item.BaseCostBySize[bucket])
+		if item.ModelKinds["base"] > 0 {
+			report.WriteString("\n### Base по числу параметров\n\n")
+			report.WriteString("| Диапазон | Base-репозиториев | Подтверждённых run с cost | Стоимость, USD |\n|---|---:|---:|---:|\n")
+			for _, bucket := range []string{"<2B", "2-<7B", "7-<13B", "13-<34B", "34-<70B", "70-<120B", "120-<500B", ">=500B", "unknown"} {
+				if item.BaseModelsBySize[bucket] > 0 {
+					fmt.Fprintf(&report, "| %s | %d | %d | %.2f |\n", bucket, item.BaseModelsBySize[bucket], item.CostedBaseBySize[bucket], item.BaseCostBySize[bucket])
+				}
 			}
 		}
 		report.WriteString("\n")
 	}
 	fmt.Fprintf(&report, "Scratch-кандидатов: %d; явное обучение с нуля подтверждено: %d; без подтверждения: %d. Fine-tune/adapter-кандидатов на compute: %d; найден compute/cost: %d; без данных: %d. Репозиториев с весами после первичного фильтра: %d.\n\n", summary.ScratchClaimCandidates, summary.ScratchClaimsResolved, summary.ScratchClaimsIgnored, summary.ReportedComputeCandidates, summary.ReportedComputeResolved, summary.ReportedComputeIgnored, summary.RetainedWeightRepositories)
-	report.WriteString("Для text base используется FLOPs = 6 × N × T: reported pretraining tokens имеют приоритет, иначе T = 20 × N. Для diffusion base используется отдельный profile fallback: FLOPs = 6 × N_effective × (N_total × diffusion_image_budget × latent_sequence_length). Коэффициенты diffusion находятся в конфиге и не смешиваются с text-суммой. Fork, quantization, conversion и merge не получают стоимость; fine-tune/adapters входят только при опубликованном compute/cost.\n\n")
+	if usesDerivativeFraction {
+		report.WriteString("Для derivatives применяется явно настроенная доля стоимости соответствующего base training. Text использует FLOPs = 6 × N × (20 × N); diffusion использует FLOPs = 6 × N × (N × diffusion_image_budget × latent_sequence_length). Fine-tune, adapter, fork, quantized и merge оцениваются одинаковой configured fraction; опубликованный derivative compute этот сценарий не подменяет.\n\n")
+	} else {
+		report.WriteString("Для text base используется FLOPs = 6 × N × T: reported pretraining tokens имеют приоритет, иначе T = 20 × N. Для diffusion base используется отдельный profile fallback: FLOPs = 6 × N_effective × (N_total × diffusion_image_budget × latent_sequence_length). Коэффициенты diffusion находятся в конфиге и не смешиваются с text-суммой. Fork, quantization, conversion и merge не получают стоимость; fine-tune/adapters входят только при опубликованном compute/cost.\n\n")
+	}
 	report.WriteString("Ограничения интерпретации:\n\n")
 	report.WriteString("- Первичный отбор 2025 сделан по `createdAt` репозитория.\n")
 	report.WriteString("- Если в training section явно указан другой год и не указан 2025, такой run исключён; без даты используется год `createdAt` как допущение.\n")
-	report.WriteString("- Base без достаточного independent-pretraining evidence и derivatives без опубликованного compute в сумму не входят.\n")
+	if usesDerivativeFraction {
+		report.WriteString("- Derivatives без определимого полного размера base/checkpoint не получают числовую стоимость.\n")
+	} else {
+		report.WriteString("- Base без достаточного independent-pretraining evidence и derivatives без опубликованного compute в сумму не входят.\n")
+	}
 	report.WriteString("- Копии с идентичной карточкой дедуплицируются; переписанные зеркала без общего run ID всё ещё невозможно надёжно связать.\n")
 	report.WriteString("- Один и тот же текст карточки мог использоваться для разных запусков; консервативная дедупликация может занижать нижнюю границу.\n")
 	report.WriteString("- Формула оценивает H100 GPU-rental equivalent; CPU, сеть, storage, данные и работа команды не включены.\n")

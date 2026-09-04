@@ -42,21 +42,37 @@ func modelToRecordWithReview(endpoint string, model catalogModel, selection sele
 	}
 	record.ReportedCompute = reported
 	if record.ModelKind != "base" {
-		if !selection.CountReportedDerivativeCosts || reported == nil || (record.ModelKind != "finetune" && record.ModelKind != "adapter") {
+		if selection.CountReportedDerivativeCosts && reported != nil && (record.ModelKind == "finetune" || record.ModelKind == "adapter") {
+			cost := reported.CostUSD
+			record.TrainingCostUSD = &cost
+			record.LowerTrainingCostUSD = floatPointer(cost)
+			record.UpperTrainingCostUSD = floatPointer(cost)
+			record.TrainingCostMethod = reported.CostMethod
+			record.TrainingCostTier = "reported"
+			record.Compute = append(record.Compute, computeEstimate{
+				Profile: "reported_training_time", GPUName: reported.GPUName,
+				TotalGPUs: reported.GPUCount, GPUHours: reported.GPUHours,
+				WallDays: reported.Hours / 24, CostUSD: reported.CostUSD,
+				Fraction: 1, Method: reported.CostMethod, Source: reported.Source,
+			})
 			return record
 		}
-		cost := reported.CostUSD
-		record.TrainingCostUSD = &cost
-		record.LowerTrainingCostUSD = floatPointer(cost)
-		record.UpperTrainingCostUSD = floatPointer(cost)
-		record.TrainingCostMethod = reported.CostMethod
-		record.TrainingCostTier = "reported"
-		record.Compute = append(record.Compute, computeEstimate{
-			Profile: "reported_training_time", GPUName: reported.GPUName,
-			TotalGPUs: reported.GPUCount, GPUHours: reported.GPUHours,
-			WallDays: reported.Hours / 24, CostUSD: reported.CostUSD,
-			Fraction: 1, Method: reported.CostMethod, Source: reported.Source,
-		})
+		for _, profileName := range selection.ComputeProfiles {
+			profile, ok := profiles[profileName]
+			if !ok || params <= 0 || profile.FinetuneCostFraction <= 0 {
+				continue
+			}
+			estimate := estimateDerivativeTrainingCompute(params, record.ModelKind, isDiffusionModel(model), profile)
+			record.Compute = append(record.Compute, estimate)
+			if record.TrainingCostUSD == nil {
+				cost := estimate.CostUSD
+				record.TrainingCostUSD = floatPointer(cost)
+				record.LowerTrainingCostUSD = floatPointer(cost)
+				record.UpperTrainingCostUSD = floatPointer(cost)
+				record.TrainingCostMethod = estimate.Method
+				record.TrainingCostTier = "configured_derivative_fraction"
+			}
+		}
 		return record
 	}
 
