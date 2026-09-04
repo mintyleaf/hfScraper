@@ -289,51 +289,66 @@ func localLLMResponseFormat() map[string]any {
 }
 
 func callLocalLLM(ctx context.Context, client *http.Client, config localLLMConfig, input localLLMReviewInput) (localLLMReview, error) {
-	payload := openAIChatRequest{
-		Model: config.Model,
-		Messages: []openAIChatMessage{
-			{Role: "system", Content: localLLMSystemPrompt(config.Scope)},
-			{Role: "user", Content: localLLMUserPrompt(input)},
-		},
-		Temperature:    0,
-		MaxTokens:      700,
-		Stream:         false,
-		ResponseFormat: localLLMResponseFormat(),
+	messages := []openAIChatMessage{
+		{Role: "system", Content: localLLMSystemPrompt(config.Scope)},
+		{Role: "user", Content: localLLMUserPrompt(input)},
 	}
-	encoded, err := json.Marshal(payload)
+	request := func(messages []openAIChatMessage) (string, error) {
+		payload := openAIChatRequest{Model: config.Model, Messages: messages, Temperature: 0, MaxTokens: 700, Stream: false, ResponseFormat: localLLMResponseFormat()}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return "", err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, localLLMChatURL(config.BaseURL), bytes.NewReader(encoded))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if key := localLLMAPIKey(config); key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		closeErr := resp.Body.Close()
+		if readErr != nil {
+			return "", readErr
+		}
+		if closeErr != nil {
+			return "", closeErr
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return "", fmt.Errorf("local LLM returned HTTP %s: %s", resp.Status, truncate(string(body), 500))
+		}
+		var response openAIChatResponse
+		if err := json.Unmarshal(body, &response); err != nil {
+			return "", fmt.Errorf("decode local LLM response: %w", err)
+		}
+		if len(response.Choices) == 0 {
+			return "", errors.New("local LLM response has no choices")
+		}
+		return response.Choices[0].Message.Content, nil
+	}
+	content, err := request(messages)
 	if err != nil {
 		return localLLMReview{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, localLLMChatURL(config.BaseURL), bytes.NewReader(encoded))
-	if err != nil {
-		return localLLMReview{}, err
+	review, validationErr := parseLocalLLMContent(content, input.Card)
+	if validationErr != nil && strings.Contains(config.Scope, "_derivative_fraction") {
+		messages = append(messages,
+			openAIChatMessage{Role: "assistant", Content: content},
+			openAIChatMessage{Role: "user", Content: "The previous JSON failed evidence validation. For high or medium confidence, copy evidence character-for-character from MODEL_CARD without removing Markdown or changing punctuation or spacing. Do the same for parameter_evidence. If no direct substring supports a field, use confidence low and an empty evidence string. Return one corrected JSON object only."},
+		)
+		content, err = request(messages)
+		if err != nil {
+			return localLLMReview{}, fmt.Errorf("local LLM corrective request failed after %v: %w", validationErr, err)
+		}
+		review, validationErr = parseLocalLLMContent(content, input.Card)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if key := localLLMAPIKey(config); key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return localLLMReview{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return localLLMReview{}, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return localLLMReview{}, fmt.Errorf("local LLM returned HTTP %s: %s", resp.Status, truncate(string(body), 500))
-	}
-	var response openAIChatResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return localLLMReview{}, fmt.Errorf("decode local LLM response: %w", err)
-	}
-	if len(response.Choices) == 0 {
-		return localLLMReview{}, errors.New("local LLM response has no choices")
-	}
-	review, err := parseLocalLLMContent(response.Choices[0].Message.Content, input.Card)
-	if err != nil {
-		return localLLMReview{}, err
+	if validationErr != nil {
+		return localLLMReview{}, validationErr
 	}
 	review.Source = "local OpenAI-compatible LLM " + config.Model
 	review.CardHash = input.CardHash

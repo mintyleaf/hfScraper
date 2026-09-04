@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +42,31 @@ func TestDerivativeEvidenceStillRejectsParaphrase(t *testing.T) {
 	review := localLLMReview{Kind: "finetune", Confidence: "high", Evidence: "This model was fine-tuned from org/base."}
 	if err := validateLocalLLMReview(&review, card); err == nil {
 		t.Fatal("paraphrased evidence was accepted")
+	}
+}
+
+func TestDerivativeReviewCorrectsRejectedEvidence(t *testing.T) {
+	card := "This model was fine-tuned from org/base-7b."
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		evidence := "This is a fine-tune of org/base-7b."
+		if calls == 2 {
+			evidence = card
+		}
+		content, _ := json.Marshal(localLLMReview{Kind: "finetune", Confidence: "high", Evidence: evidence})
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": string(content)}}}})
+	}))
+	defer server.Close()
+
+	review, err := callLocalLLM(context.Background(), server.Client(), localLLMConfig{
+		Scope: "text_llm_derivative_fraction", BaseURL: server.URL + "/v1", Model: "test",
+	}, localLLMReviewInput{Card: card})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || review.Evidence != card {
+		t.Fatalf("calls=%d review=%#v", calls, review)
 	}
 }
 
