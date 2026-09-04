@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -386,15 +387,20 @@ func validateLocalLLMReview(review *localLLMReview, card string) error {
 		review.Confidence = "low"
 	}
 	if review.Confidence != "low" {
-		if review.Evidence == "" || !normalizedContains(card, review.Evidence) {
+		canonical, ok := canonicalCardEvidence(card, review.Evidence)
+		if !ok {
 			return errors.New("local LLM evidence is not a verbatim model-card substring")
 		}
+		review.Evidence = canonical
 	}
-	if review.ReportedParametersB < 0 || (review.ReportedParametersB > 0 && (review.ParameterEvidence == "" || !normalizedContains(card, review.ParameterEvidence))) {
+	parameterEvidence, parameterEvidenceOK := canonicalCardEvidence(card, review.ParameterEvidence)
+	if review.ReportedParametersB < 0 || (review.ReportedParametersB > 0 && !parameterEvidenceOK) {
 		// A bad optional parameter extraction must not discard an otherwise valid
 		// lineage review. Drop only the unsupported numeric claim.
 		review.ReportedParametersB = 0
 		review.ParameterEvidence = ""
+	} else if review.ReportedParametersB > 0 {
+		review.ParameterEvidence = parameterEvidence
 	}
 	// Never trust a year emitted by the classifier unless the same year occurs
 	// in its verbatim evidence. Otherwise a plausible-looking hallucinated 2025
@@ -438,6 +444,44 @@ func normalizeCanonicalRun(value string) string {
 func normalizedContains(haystack, needle string) bool {
 	normalize := func(value string) string { return strings.ToLower(strings.Join(strings.Fields(value), " ")) }
 	return strings.Contains(normalize(haystack), normalize(needle))
+}
+
+var localLLMEvidenceTokenRE = regexp.MustCompile(`[\p{L}\p{N}]+`)
+
+// canonicalCardEvidence accepts evidence whose words are verbatim and
+// contiguous after ignoring Markdown punctuation, then returns the exact
+// model-card substring. This handles cards such as "**Finetuned from model
+// :** org/base" without weakening the no-hallucinated-evidence invariant.
+func canonicalCardEvidence(card, evidence string) (string, bool) {
+	evidence = strings.TrimSpace(evidence)
+	if evidence == "" {
+		return "", false
+	}
+	if strings.Contains(card, evidence) {
+		return evidence, true
+	}
+	tokens := localLLMEvidenceTokenRE.FindAllString(evidence, -1)
+	if len(tokens) < 3 {
+		return "", false
+	}
+	alphanumericLength := 0
+	parts := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		alphanumericLength += len([]rune(token))
+		parts = append(parts, regexp.QuoteMeta(token))
+	}
+	if alphanumericLength < 12 {
+		return "", false
+	}
+	matcher, err := regexp.Compile(`(?i)` + strings.Join(parts, `[^\p{L}\p{N}]*`))
+	if err != nil {
+		return "", false
+	}
+	match := matcher.FindString(card)
+	if match == "" {
+		return "", false
+	}
+	return strings.TrimSpace(match), true
 }
 
 func compactModelCard(card string, limit int) string {

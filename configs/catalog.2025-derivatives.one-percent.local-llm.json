@@ -38,7 +38,7 @@
     "api_key_env": "HF_LLM_API_KEY",
     "workers": 2,
     "timeout_seconds": 180,
-    "max_input_chars": 16000,
+    "max_input_chars": 10000,
     "cache_file": "cache/derivative-lineage-one-percent-v1.jsonl"
   },
   "derivative_sampling": {

@@ -18,6 +18,29 @@ func TestDerivativeFractionPromptRequestsUpstreamSize(t *testing.T) {
 	}
 }
 
+func TestDerivativeEvidenceCanonicalizesMarkdownPunctuation(t *testing.T) {
+	card := "- **Finetuned from model :** TouchNight/Ministral-8B-Instruct-2410-HF\n"
+	review := localLLMReview{
+		Kind:       "finetune",
+		Confidence: "high",
+		Evidence:   "Finetuned from model: TouchNight/Ministral-8B-Instruct-2410-HF",
+	}
+	if err := validateLocalLLMReview(&review, card); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(card, review.Evidence) {
+		t.Fatalf("canonical evidence %q is not an exact card substring", review.Evidence)
+	}
+}
+
+func TestDerivativeEvidenceStillRejectsParaphrase(t *testing.T) {
+	card := "This repository contains a serialized checkpoint."
+	review := localLLMReview{Kind: "finetune", Confidence: "high", Evidence: "This model was fine-tuned from org/base."}
+	if err := validateLocalLLMReview(&review, card); err == nil {
+		t.Fatal("paraphrased evidence was accepted")
+	}
+}
+
 func TestParameterBillionsFromName(t *testing.T) {
 	for _, test := range []struct {
 		value string
