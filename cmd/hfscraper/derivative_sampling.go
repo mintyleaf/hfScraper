@@ -31,6 +31,7 @@ import (
 // tokens, never with the tiny adapter checkpoint or a pretraining fallback.
 type derivativeSamplingConfig struct {
 	Enabled                 bool     `json:"enabled"`
+	BaseCostFraction        float64  `json:"base_cost_fraction,omitempty"`
 	Seed                    int64    `json:"seed"`
 	SamplePerStratum        int      `json:"sample_per_stratum"`
 	CensusMinParametersB    float64  `json:"census_min_parameters_b"`
@@ -49,6 +50,7 @@ type derivativeSamplingConfig struct {
 
 type derivativeCandidate struct {
 	Model           catalogModel
+	Market          string
 	Kind            string
 	Parameters      int64
 	ParameterSource string
@@ -61,7 +63,12 @@ type derivativeCandidate struct {
 type derivativeManifestEntry struct {
 	RepoID               string   `json:"repo_id"`
 	Owner                string   `json:"owner"`
+	Market               string   `json:"market"`
 	Kind                 string   `json:"kind"`
+	PipelineTag          string   `json:"pipeline_tag,omitempty"`
+	LibraryName          string   `json:"library_name,omitempty"`
+	Tags                 []string `json:"tags,omitempty"`
+	BaseRelation         string   `json:"base_relation,omitempty"`
 	BaseModel            string   `json:"base_model,omitempty"`
 	Parameters           int64    `json:"parameters"`
 	ParameterSource      string   `json:"parameter_source"`
@@ -81,6 +88,8 @@ type derivativePlanSummary struct {
 	GeneratedAt                 string         `json:"generated_at"`
 	Seed                        int64          `json:"seed"`
 	Population                  int            `json:"population"`
+	TextModels                  int            `json:"text_models"`
+	DiffusionModels             int            `json:"diffusion_models"`
 	FineTunes                   int            `json:"fine_tunes"`
 	Adapters                    int            `json:"adapters"`
 	KnownParameters             int            `json:"known_parameters"`
@@ -186,7 +195,7 @@ func runDerivativeSampling(ctx context.Context, config catalogConfig, execute bo
 	if !d.Enabled {
 		return errors.New("derivative_sampling.enabled must be true")
 	}
-	if d.SamplePerStratum < 1 || d.ArtifactWorkers < 1 || d.ArtifactWorkers > 8 || d.BootstrapIterations < 100 {
+	if d.SamplePerStratum < 1 || d.ArtifactWorkers < 1 || d.ArtifactWorkers > 8 || d.BootstrapIterations < 100 || d.BaseCostFraction < 0 || d.BaseCostFraction > 1 {
 		return errors.New("invalid derivative sampling limits")
 	}
 	if execute && (!config.LocalLLM.Enabled || config.LocalLLM.BaseURL == "" || config.LocalLLM.Model == "") {
@@ -228,7 +237,7 @@ func runDerivativeSampling(ctx context.Context, config catalogConfig, execute bo
 	}
 	candidates := buildDerivativeCandidates(checkpoint.Models, selections)
 	if len(candidates) == 0 {
-		return errors.New("no text fine-tune/adapter candidates found")
+		return errors.New("no fine-tune/adapter candidates found")
 	}
 	if err := scanDerivativeParquet(ctx, paths, candidates, nil, logger); err != nil {
 		return err
@@ -247,13 +256,19 @@ func runDerivativeSampling(ctx context.Context, config catalogConfig, execute bo
 	if err := writeJSONFile(filepath.Join(config.OutputDir, "derivative-plan-summary.json"), plan); err != nil {
 		return err
 	}
-	fmt.Printf("Derivative plan: population=%d fine_tunes=%d adapters=%d known_parameters=%d unknown_parameters=%d parquet_covered=%d published_compute=%d manifest=%d targeted_repositories=%d maximum_http_requests=%d\n", plan.Population, plan.FineTunes, plan.Adapters, plan.KnownParameters, plan.UnknownParameters, plan.ParquetCovered, plan.PublishedCompute, plan.ManifestEntries, plan.TargetedRepositories, plan.MaximumHTTPRequests)
+	fmt.Printf("Derivative plan: population=%d text=%d diffusion=%d fine_tunes=%d adapters=%d known_parameters=%d unknown_parameters=%d parquet_covered=%d published_compute=%d manifest=%d targeted_repositories=%d maximum_http_requests=%d\n", plan.Population, plan.TextModels, plan.DiffusionModels, plan.FineTunes, plan.Adapters, plan.KnownParameters, plan.UnknownParameters, plan.ParquetCovered, plan.PublishedCompute, plan.ManifestEntries, plan.TargetedRepositories, plan.MaximumHTTPRequests)
 	if !execute {
 		fmt.Printf("Plan only. Review %s and %s. Re-run with --execute for network/LLM work.\n", manifestPath, filepath.Join(config.OutputDir, "derivative-plan-summary.json"))
 		return nil
 	}
-	if err := preflightDerivativeLLM(ctx, config); err != nil {
-		return err
+	if d.BaseCostFraction > 0 {
+		if err := preflightDerivativeLineageLLM(ctx, config); err != nil {
+			return err
+		}
+	} else {
+		if err := preflightDerivativeLLM(ctx, config); err != nil {
+			return err
+		}
 	}
 	cards := make(map[string]string)
 	if err := scanDerivativeParquet(ctx, paths, nil, manifest, logger, cards); err != nil {
@@ -268,6 +283,9 @@ func runDerivativeSampling(ctx context.Context, config catalogConfig, execute bo
 	artifacts, err := fetchDerivativeArtifacts(ctx, client, config, manifest, cards, logger)
 	if err != nil {
 		return err
+	}
+	if d.BaseCostFraction > 0 {
+		return runDerivativeFractionEstimate(ctx, config, manifest, artifacts, logger)
 	}
 	evidence, err := extractDerivativeEvidence(ctx, config, manifest, artifacts, logger)
 	if err != nil {
@@ -304,11 +322,23 @@ func buildDerivativeCandidates(models []catalogModel, selections []compiledSelec
 	seen := make(map[string]bool)
 	var out []derivativeCandidate
 	for _, selection := range selections {
-		if !selection.config.TargetLLMOnly {
+		market := ""
+		if selection.config.TargetLLMOnly {
+			market = "text_llm"
+		} else if selection.config.TargetDiffusionOnly {
+			market = "diffusion"
+		}
+		if market == "" {
 			continue
 		}
 		for _, model := range models {
-			if seen[model.ID] || !matchesSelection(model, selection, model.Safetensors.Total) || !catalogIsTargetLLM(model) {
+			if seen[model.ID] || !matchesSelection(model, selection, model.Safetensors.Total) {
+				continue
+			}
+			if market == "text_llm" && !catalogIsTargetLLM(model) {
+				continue
+			}
+			if market == "diffusion" && !catalogIsTargetDiffusion(model) {
 				continue
 			}
 			kind := catalogModelKind(model)
@@ -325,7 +355,7 @@ func buildDerivativeCandidates(models []catalogModel, selections []compiledSelec
 					params, source = 0, "unresolved_base_model"
 				}
 			}
-			out = append(out, derivativeCandidate{Model: model, Kind: kind, Parameters: params, ParameterSource: source, BaseModel: baseID, Bucket: parameterRange(params), Reported: reportedComputeFromCardData(model.CardData)})
+			out = append(out, derivativeCandidate{Model: model, Market: market, Kind: kind, Parameters: params, ParameterSource: source, BaseModel: baseID, Bucket: parameterRange(params), Reported: reportedComputeFromCardData(model.CardData)})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Model.ID < out[j].Model.ID })
@@ -393,13 +423,13 @@ func scanDerivativeParquet(ctx context.Context, paths []string, candidates []der
 
 func derivativeStratum(c derivativeCandidate) string {
 	if c.Reported != nil {
-		return c.Kind + "|published_compute_census"
+		return c.Market + "|" + c.Kind + "|published_compute_census"
 	}
 	source := "missing"
 	if c.Covered {
 		source = "parquet"
 	}
-	return c.Kind + "|" + c.Bucket + "|" + source
+	return c.Market + "|" + c.Kind + "|" + c.Bucket + "|" + source
 }
 
 func buildDerivativeManifest(candidates []derivativeCandidate, cfg derivativeSamplingConfig) ([]derivativeManifestEntry, derivativePlanSummary, error) {
@@ -407,6 +437,11 @@ func buildDerivativeManifest(candidates []derivativeCandidate, cfg derivativeSam
 	groups := map[string][]derivativeCandidate{}
 	var fixed []derivativeCandidate
 	for _, c := range candidates {
+		if c.Market == "diffusion" {
+			plan.DiffusionModels++
+		} else {
+			plan.TextModels++
+		}
 		if c.Kind == "adapter" {
 			plan.Adapters++
 		} else {
@@ -472,7 +507,7 @@ func buildDerivativeManifest(candidates []derivativeCandidate, cfg derivativeSam
 			plan.TargetedRepositories++
 		}
 		artifacts := append([]string(nil), cfg.Artifacts...)
-		manifest = append(manifest, derivativeManifestEntry{RepoID: c.Model.ID, Owner: modelOwner(c.Model), Kind: c.Kind, BaseModel: c.BaseModel, Parameters: c.Parameters, ParameterSource: c.ParameterSource, ParameterRange: c.Bucket, CardSource: source, PublishedCompute: c.Reported != nil, Census: census, Stratum: key, StratumPopulation: plan.PopulationByStratum[key], StratumSample: counts[key], InclusionProbability: 1 / weight, SamplingWeight: weight, Artifacts: artifacts})
+		manifest = append(manifest, derivativeManifestEntry{RepoID: c.Model.ID, Owner: modelOwner(c.Model), Market: c.Market, Kind: c.Kind, PipelineTag: c.Model.PipelineTag, LibraryName: c.Model.LibraryName, Tags: c.Model.Tags, BaseRelation: c.Model.BaseModels.Relation, BaseModel: c.BaseModel, Parameters: c.Parameters, ParameterSource: c.ParameterSource, ParameterRange: c.Bucket, CardSource: source, PublishedCompute: c.Reported != nil, Census: census, Stratum: key, StratumPopulation: plan.PopulationByStratum[key], StratumSample: counts[key], InclusionProbability: 1 / weight, SamplingWeight: weight, Artifacts: artifacts})
 		plan.SampleByStratum[key]++
 	}
 	plan.ManifestEntries = len(manifest)
@@ -1005,9 +1040,9 @@ func writeDerivativeManifestCSV(path string, entries []derivativeManifestEntry) 
 		return err
 	}
 	w := csv.NewWriter(f)
-	_ = w.Write([]string{"repo_id", "owner", "kind", "base_model", "parameters", "parameter_source", "parameter_range", "card_source", "published_compute", "census", "stratum", "population", "sample", "weight"})
+	_ = w.Write([]string{"repo_id", "owner", "market", "kind", "base_model", "parameters", "parameter_source", "parameter_range", "card_source", "published_compute", "census", "stratum", "population", "sample", "weight"})
 	for _, e := range entries {
-		_ = w.Write([]string{e.RepoID, e.Owner, e.Kind, e.BaseModel, strconv.FormatInt(e.Parameters, 10), e.ParameterSource, e.ParameterRange, e.CardSource, strconv.FormatBool(e.PublishedCompute), strconv.FormatBool(e.Census), e.Stratum, strconv.Itoa(e.StratumPopulation), strconv.Itoa(e.StratumSample), strconv.FormatFloat(e.SamplingWeight, 'g', -1, 64)})
+		_ = w.Write([]string{e.RepoID, e.Owner, e.Market, e.Kind, e.BaseModel, strconv.FormatInt(e.Parameters, 10), e.ParameterSource, e.ParameterRange, e.CardSource, strconv.FormatBool(e.PublishedCompute), strconv.FormatBool(e.Census), e.Stratum, strconv.Itoa(e.StratumPopulation), strconv.Itoa(e.StratumSample), strconv.FormatFloat(e.SamplingWeight, 'g', -1, 64)})
 	}
 	w.Flush()
 	if err := w.Error(); err != nil {
