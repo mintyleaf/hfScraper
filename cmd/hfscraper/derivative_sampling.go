@@ -349,9 +349,9 @@ func buildDerivativeCandidates(models []catalogModel, selections []compiledSelec
 			params, source := model.Safetensors.Total, "repository_safetensors"
 			baseID := firstBaseModel(model)
 			if kind == "adapter" || params <= 0 {
-				if base := byID[strings.ToLower(baseID)]; base.Safetensors.Total > 0 {
+				if base := byID[strings.ToLower(baseID)]; base.Safetensors.Total > 0 && derivativeBaseMatchesMarket(base, market) {
 					params, source = base.Safetensors.Total, "declared_base_model_safetensors"
-				} else if kind == "adapter" {
+				} else {
 					params, source = 0, "unresolved_base_model"
 				}
 			}
@@ -360,6 +360,17 @@ func buildDerivativeCandidates(models []catalogModel, selections []compiledSelec
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Model.ID < out[j].Model.ID })
 	return out
+}
+
+func derivativeBaseMatchesMarket(base catalogModel, market string) bool {
+	switch market {
+	case "text_llm":
+		return catalogIsTargetLLM(base)
+	case "diffusion":
+		return catalogIsTargetDiffusion(base)
+	default:
+		return false
+	}
 }
 
 func scanDerivativeParquet(ctx context.Context, paths []string, candidates []derivativeCandidate, manifest []derivativeManifestEntry, logger *catalogLogger, optionalCards ...map[string]string) error {

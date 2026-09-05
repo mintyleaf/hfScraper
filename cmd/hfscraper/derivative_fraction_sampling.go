@@ -66,6 +66,7 @@ type derivativeFractionSummary struct {
 }
 
 var parameterBillionsInNameRE = regexp.MustCompile(`(?i)(?:^|[-_/.])([0-9]+(?:\.[0-9]+)?)b(?:$|[-_/.])`)
+var parameterCountInEvidenceRE = regexp.MustCompile(`(?i)([0-9]+(?:\.[0-9]+)?)\s*(b|bn|billion|m|mn|million)\b`)
 
 func preflightDerivativeLineageLLM(ctx context.Context, config catalogConfig) error {
 	callConfig := config.LocalLLM
@@ -207,12 +208,36 @@ func parameterBillionsFromName(values ...string) float64 {
 	return 0
 }
 
+func parameterBillionsFromEvidence(evidence string) float64 {
+	match := parameterCountInEvidenceRE.FindStringSubmatch(evidence)
+	if len(match) != 3 {
+		return 0
+	}
+	value, err := strconv.ParseFloat(match[1], 64)
+	if err != nil || value <= 0 {
+		return 0
+	}
+	switch strings.ToLower(match[2]) {
+	case "m", "mn", "million":
+		value /= 1000
+	}
+	if value > 1000 {
+		return 0
+	}
+	return value
+}
+
 func derivativeFractionParameters(entry derivativeManifestEntry, review localLLMReview) (int64, string) {
 	if entry.Parameters > 0 {
 		return entry.Parameters, entry.ParameterSource
 	}
 	if review.ReportedParametersB > 0 {
-		return int64(review.ReportedParametersB * 1e9), "local_llm_verbatim_model_card"
+		// The evidence is deterministic and authoritative for the unit. A model
+		// may copy "900M parameters" correctly but emit 900 (or 600) in a field
+		// expressed in billions; never price that unchecked numeric conversion.
+		if billions := parameterBillionsFromEvidence(review.ParameterEvidence); billions > 0 {
+			return int64(billions * 1e9), "verbatim_model_card_parameter_evidence"
+		}
 	}
 	if billions := parameterBillionsFromName(review.UpstreamModel, entry.BaseModel, entry.RepoID); billions > 0 {
 		return int64(billions * 1e9), "model_name_parameter_hint"

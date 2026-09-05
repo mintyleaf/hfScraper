@@ -85,6 +85,31 @@ func TestParameterBillionsFromName(t *testing.T) {
 	}
 }
 
+func TestParameterBillionsFromEvidenceUsesWrittenUnit(t *testing.T) {
+	for _, test := range []struct {
+		evidence string
+		want     float64
+	}{
+		{"Model size:** 900M parameters", 0.9},
+		{"The checkpoint has 14B parameters.", 14},
+		{"There are 1.5 billion parameters", 1.5},
+		{"No parameter count is stated", 0},
+	} {
+		if got := parameterBillionsFromEvidence(test.evidence); got != test.want {
+			t.Errorf("parameterBillionsFromEvidence(%q) = %v, want %v", test.evidence, got, test.want)
+		}
+	}
+}
+
+func TestDerivativeFractionParametersTrustsEvidenceUnitNotLLMNumber(t *testing.T) {
+	entry := derivativeManifestEntry{RepoID: "org/model", BaseModel: "org/base"}
+	review := localLLMReview{ReportedParametersB: 600, ParameterEvidence: "Model size:** 900M parameters"}
+	got, source := derivativeFractionParameters(entry, review)
+	if got != 900_000_000 || source != "verbatim_model_card_parameter_evidence" {
+		t.Fatalf("parameters = %d from %q", got, source)
+	}
+}
+
 func TestBuildDerivativeFractionResults(t *testing.T) {
 	textProfile := computeProfile{Name: "text", GPUTFLOPS: 989, Efficiency: 0.4, GPUHourCostUSD: 1.85, TokensPerParameter: 20, Machines: 1, GPUsPerMachine: 1}
 	diffusionProfile := computeProfile{Name: "diffusion", GPUTFLOPS: 989, Efficiency: 0.4, GPUHourCostUSD: 1.85, TokensPerParameter: 20, Machines: 1, GPUsPerMachine: 1, DiffusionImageBudget: 3, LatentSequenceLength: 1024}
@@ -98,7 +123,7 @@ func TestBuildDerivativeFractionResults(t *testing.T) {
 	}
 	reviews := map[string]localLLMReview{
 		"org/text-a":      {Kind: "finetune", Confidence: "high", CanonicalTrainingRun: "org/run-a"},
-		"org/text-medium": {Kind: "adapter", Confidence: "medium", ReportedParametersB: 14, CanonicalTrainingRun: "org/run-b"},
+		"org/text-medium": {Kind: "adapter", Confidence: "medium", ReportedParametersB: 14, ParameterEvidence: "14B parameters", CanonicalTrainingRun: "org/run-b"},
 		"org/image-a":     {Kind: "adapter", Confidence: "high", CanonicalTrainingRun: "org/image-run"},
 		"org/quant":       {Kind: "quantized", Confidence: "high", CanonicalTrainingRun: "org/quant"},
 		"org/text-copy":   {Kind: "finetune", Confidence: "high", CanonicalTrainingRun: "org/run-a"},
@@ -143,6 +168,33 @@ func TestBuildDerivativeCandidatesIncludesTextAndDiffusion(t *testing.T) {
 	got := buildDerivativeCandidates(models, selections)
 	if len(got) != 2 || got[0].Market != "diffusion" || got[1].Market != "text_llm" {
 		t.Fatalf("candidates = %#v", got)
+	}
+}
+
+func TestBuildDerivativeCandidatesRejectsCrossMarketBaseParameters(t *testing.T) {
+	from := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2025, 12, 31, 23, 59, 59, 0, time.UTC)
+	models := []catalogModel{
+		{
+			ID: "org/fake-image", CreatedAt: "2025-04-01T00:00:00Z", PipelineTag: "text-to-image",
+			Tags:       []string{"diffusers", "base_model:org/text-base"},
+			BaseModels: catalogBaseModels{Relation: "finetune", Models: []catalogBaseModel{{ID: "org/text-base"}}},
+		},
+		{
+			ID: "org/text-base", CreatedAt: "2025-02-01T00:00:00Z", PipelineTag: "text-generation",
+			Tags: []string{"transformers"}, Safetensors: catalogSafetensors{Total: 684_000_000_000},
+		},
+	}
+	selections := []compiledSelection{{
+		config: selectionConfig{TargetDiffusionOnly: true, ModelKinds: []string{"finetune"}}, from: from, to: to,
+	}}
+
+	got := buildDerivativeCandidates(models, selections)
+	if len(got) != 1 {
+		t.Fatalf("candidates = %#v", got)
+	}
+	if got[0].Parameters != 0 || got[0].ParameterSource != "unresolved_base_model" {
+		t.Fatalf("cross-market base parameters leaked into diffusion estimate: %#v", got[0])
 	}
 }
 
