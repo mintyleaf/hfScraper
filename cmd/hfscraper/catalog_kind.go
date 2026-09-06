@@ -78,14 +78,16 @@ func catalogIsTargetLLM(model catalogModel) bool {
 
 func catalogIsTargetDiffusion(model catalogModel) bool {
 	pipeline := strings.ToLower(model.PipelineTag)
+	joined := strings.ToLower(model.ID + " " + strings.Join(model.Tags, " "))
+	// Repository metadata can carry a generic or incorrect image pipeline for
+	// video checkpoints. Domain evidence must win before accepting the tag.
+	if diffusionExcludedDomainRE.MatchString(joined) {
+		return false
+	}
 	switch pipeline {
 	case "text-to-image", "image-to-image", "unconditional-image-generation":
 		return true
 	case "text-to-video", "image-to-video", "video-generation", "audio-to-audio", "text-to-speech":
-		return false
-	}
-	joined := strings.ToLower(model.ID + " " + strings.Join(model.Tags, " "))
-	if diffusionExcludedDomainRE.MatchString(joined) {
 		return false
 	}
 	return diffusionTargetRE.MatchString(joined)

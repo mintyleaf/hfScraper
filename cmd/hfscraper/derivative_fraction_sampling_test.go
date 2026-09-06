@@ -250,7 +250,7 @@ func TestCatalogModelKindRejectsVerifiedExactWeightMirrors(t *testing.T) {
 func TestCatalogIsTargetDiffusionRejectsAbbreviatedVideoModels(t *testing.T) {
 	for _, model := range []catalogModel{
 		{ID: "org/model-t2v", Tags: []string{"diffusers"}},
-		{ID: "org/model", Tags: []string{"diffusers", "base_model:org/wan22_i2v_14b"}},
+		{ID: "org/model", PipelineTag: "text-to-image", Tags: []string{"diffusers", "base_model:org/wan22_i2v_14b"}},
 	} {
 		if catalogIsTargetDiffusion(model) {
 			t.Errorf("catalogIsTargetDiffusion(%q) accepted a video model", model.ID)
