@@ -8,6 +8,7 @@ import (
 var (
 	diffusionExcludedDomainRE = regexp.MustCompile(`(?i)(video|audio|speech|music|vision-language|multimodal|\bvlm\b|protein|genomic|\bdna\b)`)
 	diffusionTargetRE         = regexp.MustCompile(`(?i)(diffusers?|stable[-_ ]?diffusion|sdxl|image[-_ ]?generation|text[-_ ]?to[-_ ]?image|image[-_ ]?to[-_ ]?image|(^|[-_./])flux($|[-_./0-9]))`)
+	precisionCopySuffixRE     = regexp.MustCompile(`(?i)(?:[-_.](?:bf16|fp16|f16))$`)
 )
 
 func catalogModelKind(model catalogModel) string {
@@ -21,7 +22,7 @@ func catalogModelKind(model catalogModel) string {
 	tags := lowerSet(model.Tags)
 	library := strings.ToLower(model.LibraryName)
 	switch {
-	case tags["gguf"] || tags["ggml"] || tags["gptq"] || tags["awq"] || tags["exl2"] || tags["quantized"] || tags["compressed-tensors"] || tags["bitsandbytes"] || tags["4-bit"] || tags["8-bit"] || library == "mlx" || library == "onnx" || library == "openvino" || catalogQuantNameRE.MatchString(model.ID) || catalogConvertNameRE.MatchString(model.ID) || catalogEmbeddedSourceNameRE.MatchString(model.ID) || catalogHFConversionNameRE.MatchString(model.ID):
+	case tags["gguf"] || tags["ggml"] || tags["gptq"] || tags["awq"] || tags["exl2"] || tags["quantized"] || tags["compressed-tensors"] || tags["bitsandbytes"] || tags["4-bit"] || tags["8-bit"] || library == "mlx" || library == "onnx" || library == "openvino" || catalogQuantNameRE.MatchString(model.ID) || catalogConvertNameRE.MatchString(model.ID) || catalogEmbeddedSourceNameRE.MatchString(model.ID) || catalogHFConversionNameRE.MatchString(model.ID) || precisionCopyOfDeclaredBase(model):
 		return "quantized"
 	case tags["model-merge"] || tags["merge"] || catalogMergeNameRE.MatchString(model.ID):
 		return "merge"
@@ -40,6 +41,19 @@ func catalogModelKind(model catalogModel) string {
 	default:
 		return "base"
 	}
+}
+
+func precisionCopyOfDeclaredBase(model catalogModel) bool {
+	if !precisionCopySuffixRE.MatchString(model.ID) {
+		return false
+	}
+	baseID := firstBaseModel(model)
+	if baseID == "" {
+		return false
+	}
+	repositoryFamily := canonicalBaseFamilyName(model.ID)
+	baseFamily := canonicalBaseFamilyName(baseID)
+	return repositoryFamily == baseFamily || strings.HasSuffix(repositoryFamily, "-"+baseFamily)
 }
 
 func catalogIsTargetLLM(model catalogModel) bool {

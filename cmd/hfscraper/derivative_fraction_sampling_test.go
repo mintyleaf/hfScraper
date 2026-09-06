@@ -198,6 +198,39 @@ func TestBuildDerivativeCandidatesRejectsCrossMarketBaseParameters(t *testing.T)
 	}
 }
 
+func TestCatalogModelKindRejectsFormatOnlyCopiesBeforeRelation(t *testing.T) {
+	tests := []catalogModel{
+		{
+			ID:         "unsloth/Kimi-K2-Thinking-BF16",
+			BaseModels: catalogBaseModels{Relation: "finetune", Models: []catalogBaseModel{{ID: "moonshotai/Kimi-K2-Thinking"}}},
+		},
+		{
+			ID:         "DevQuasar/moonshotai.Kimi-K2-Instruct-BF16",
+			BaseModels: catalogBaseModels{Relation: "finetune", Models: []catalogBaseModel{{ID: "moonshotai/Kimi-K2-Instruct"}}},
+		},
+		{
+			ID:         "CPU-Hybrid-MoE/DeepSeek-V3-0324-CPU-NUMA2-AMXINT4",
+			BaseModels: catalogBaseModels{Relation: "finetune", Models: []catalogBaseModel{{ID: "deepseek-ai/DeepSeek-V3-0324"}}},
+		},
+		{
+			ID:         "Tile-AI/DeepSeek-V3.2-Exp-TileRT",
+			BaseModels: catalogBaseModels{Relation: "finetune", Models: []catalogBaseModel{{ID: "deepseek-ai/DeepSeek-V3.2-Exp"}}},
+		},
+	}
+	for _, model := range tests {
+		if got := catalogModelKind(model); got != "quantized" {
+			t.Errorf("catalogModelKind(%q) = %q, want quantized", model.ID, got)
+		}
+	}
+}
+
+func TestPrecisionSuffixWithoutDeclaredBaseRemainsTrainingCandidate(t *testing.T) {
+	model := catalogModel{ID: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", Tags: []string{"sft"}}
+	if got := catalogModelKind(model); got != "finetune" {
+		t.Fatalf("catalogModelKind(%q) = %q, want finetune", model.ID, got)
+	}
+}
+
 func near(got, want float64) bool {
 	return math.Abs(got-want) <= math.Max(1e-9, math.Abs(want)*1e-12)
 }
