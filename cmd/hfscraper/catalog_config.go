@@ -215,8 +215,14 @@ var (
 	reportedDerivativeEvidenceRE = regexp.MustCompile(`(?i)\b(fine[- ]?tun(?:e|ed|ing)|instruction[- ]?tun(?:e|ed|ing)|post[- ]?train(?:ed|ing)|continued pretraining|continual pretraining|domain adaptation|distill(?:ed|ation)|\bSFT\b|\bDPO\b|\bRLHF\b|\bGRPO\b)\b`)
 	reportedAdapterEvidenceRE    = regexp.MustCompile(`(?i)\b(LoRA|QLoRA|PEFT|adapter)\b`)
 	catalogKnownKindOverrides    = map[string]string{
-		"aiqtech/LLaDA2.0-flash-preview":                                      "finetune",
-		"nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16":                          "finetune",
+		"aiqtech/LLaDA2.0-flash-preview":             "finetune",
+		"nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "finetune",
+		// These later uploads have byte-for-byte identical weight manifests to
+		// their canonical repositories. Hub base-model metadata labels them as
+		// finetunes, so keep the verified mirrors out of training accounting.
+		"fantos/Ming-flash-omni-Preview":                                      "fork",
+		"unsloth/cogito-671b-v2.1":                                            "fork",
+		"tachyphylaxis/Smoothie-Qwen3-235B-A22B":                              "fork",
 		"OpenKing/vualtgemma-1b-non-gated":                                    "fork",
 		"LSX-UniWue/LLaMmlein_120M":                                           "fork",
 		"LSX-UniWue/LLaMmlein_1B":                                             "fork",

@@ -6,7 +6,7 @@ import (
 )
 
 var (
-	diffusionExcludedDomainRE = regexp.MustCompile(`(?i)(video|audio|speech|music|vision-language|multimodal|\bvlm\b|protein|genomic|\bdna\b)`)
+	diffusionExcludedDomainRE = regexp.MustCompile(`(?i)(video|audio|speech|music|vision-language|multimodal|\bvlm\b|(?:^|[-_./])(?:t2v|i2v)(?:[-_./ 0-9]|$)|protein|genomic|\bdna\b)`)
 	diffusionTargetRE         = regexp.MustCompile(`(?i)(diffusers?|stable[-_ ]?diffusion|sdxl|image[-_ ]?generation|text[-_ ]?to[-_ ]?image|image[-_ ]?to[-_ ]?image|(^|[-_./])flux($|[-_./0-9]))`)
 	precisionCopySuffixRE     = regexp.MustCompile(`(?i)(?:[-_.](?:bf16|fp16|f16))$`)
 )

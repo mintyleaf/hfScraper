@@ -231,6 +231,33 @@ func TestPrecisionSuffixWithoutDeclaredBaseRemainsTrainingCandidate(t *testing.T
 	}
 }
 
+func TestCatalogModelKindRejectsVerifiedExactWeightMirrors(t *testing.T) {
+	for _, id := range []string{
+		"fantos/Ming-flash-omni-Preview",
+		"unsloth/cogito-671b-v2.1",
+		"tachyphylaxis/Smoothie-Qwen3-235B-A22B",
+	} {
+		model := catalogModel{
+			ID:         id,
+			BaseModels: catalogBaseModels{Relation: "finetune", Models: []catalogBaseModel{{ID: "org/base"}}},
+		}
+		if got := catalogModelKind(model); got != "fork" {
+			t.Errorf("catalogModelKind(%q) = %q, want fork", id, got)
+		}
+	}
+}
+
+func TestCatalogIsTargetDiffusionRejectsAbbreviatedVideoModels(t *testing.T) {
+	for _, model := range []catalogModel{
+		{ID: "org/model-t2v", Tags: []string{"diffusers"}},
+		{ID: "org/model", Tags: []string{"diffusers", "base_model:org/wan22_i2v_14b"}},
+	} {
+		if catalogIsTargetDiffusion(model) {
+			t.Errorf("catalogIsTargetDiffusion(%q) accepted a video model", model.ID)
+		}
+	}
+}
+
 func near(got, want float64) bool {
 	return math.Abs(got-want) <= math.Max(1e-9, math.Abs(want)*1e-12)
 }
