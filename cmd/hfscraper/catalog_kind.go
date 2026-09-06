@@ -6,9 +6,10 @@ import (
 )
 
 var (
-	diffusionExcludedDomainRE = regexp.MustCompile(`(?i)(video|audio|speech|music|vision-language|multimodal|\bvlm\b|(?:^|[-_./])(?:t2v|i2v)(?:[-_./ 0-9]|$)|protein|genomic|\bdna\b)`)
-	diffusionTargetRE         = regexp.MustCompile(`(?i)(diffusers?|stable[-_ ]?diffusion|sdxl|image[-_ ]?generation|text[-_ ]?to[-_ ]?image|image[-_ ]?to[-_ ]?image|(^|[-_./])flux($|[-_./0-9]))`)
-	precisionCopySuffixRE     = regexp.MustCompile(`(?i)(?:[-_.](?:bf16|fp16|f16))$`)
+	diffusionExcludedDomainRE    = regexp.MustCompile(`(?i)(video|audio|speech|music|vision-language|multimodal|\bvlm\b|protein|genomic|\bdna\b)`)
+	diffusionVideoAbbreviationRE = regexp.MustCompile(`(?i)(?:^|[-_./])(?:t2v|i2v)(?:[-_./ 0-9]|$)`)
+	diffusionTargetRE            = regexp.MustCompile(`(?i)(diffusers?|stable[-_ ]?diffusion|sdxl|image[-_ ]?generation|text[-_ ]?to[-_ ]?image|image[-_ ]?to[-_ ]?image|(^|[-_./])flux($|[-_./0-9]))`)
+	precisionCopySuffixRE        = regexp.MustCompile(`(?i)(?:[-_.](?:bf16|fp16|f16))$`)
 )
 
 func catalogModelKind(model catalogModel) string {
@@ -81,13 +82,16 @@ func catalogIsTargetDiffusion(model catalogModel) bool {
 	joined := strings.ToLower(model.ID + " " + strings.Join(model.Tags, " "))
 	// Repository metadata can carry a generic or incorrect image pipeline for
 	// video checkpoints. Domain evidence must win before accepting the tag.
-	if diffusionExcludedDomainRE.MatchString(joined) {
+	if diffusionVideoAbbreviationRE.MatchString(joined) {
 		return false
 	}
 	switch pipeline {
 	case "text-to-image", "image-to-image", "unconditional-image-generation":
 		return true
 	case "text-to-video", "image-to-video", "video-generation", "audio-to-audio", "text-to-speech":
+		return false
+	}
+	if diffusionExcludedDomainRE.MatchString(joined) {
 		return false
 	}
 	return diffusionTargetRE.MatchString(joined)
